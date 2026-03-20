@@ -135,6 +135,15 @@ async function connectTab(chromeTabId, title, url) {
     
     if (data.type === 'success' && data.result && data.result.id) {
       connectedTabIds.add(data.result.id);
+      
+      chrome.runtime.sendMessage({
+        type: 'tab_registered',
+        id: data.result.id,
+        tabId: chromeTabId,
+        title,
+        url
+      });
+      
       return data.result.id;
     }
   } catch (error) {
