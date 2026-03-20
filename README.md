@@ -20,6 +20,8 @@ curl -sSL https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/install
 
 ![Chrome MCP Controller](https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/screen1.png)
 
+![Demo](https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/screen.gif)
+
 ## Architecture
 
 ```
