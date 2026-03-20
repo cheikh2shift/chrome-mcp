@@ -92,7 +92,7 @@ fi
 
 echo ""
 echo "Downloading Chrome extension..."
-EXTENSION_DIR="${HOME}/chrome-mcp"
+EXTENSION_DIR="${HOME}/chrome-mcp-extension"
 mkdir -p "$EXTENSION_DIR"
 
 if curl -sSL -o "${EXTENSION_DIR}/${EXTENSION_FILE}" "$EXTENSION_URL"; then
