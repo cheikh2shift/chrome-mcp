@@ -353,6 +353,19 @@ async function injectContentScript(tabId) {
   return false;
 }
 
+async function verifyAndCleanupTab(tabId, tabKey) {
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch (e) {
+    console.log('Tab no longer exists in Chrome:', tabId, 'removing from connectedTabs and daemon');
+    connectedTabs.delete(tabKey);
+    apiRequest('/unregister', 'POST', { id: tabKey }).catch(() => {});
+    updateBadge();
+    return false;
+  }
+}
+
 function updateBadge() {
   const count = connectedTabs.size;
   chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
@@ -384,18 +397,37 @@ async function processCommand(msg) {
     return;
   }
   
+  const tabExists = await verifyAndCleanupTab(tab.tabId, tab_id);
+  if (!tabExists) {
+    wsSend({
+      type: 'command_failed',
+      cmd_id,
+      error: `Tab ${tab_id} no longer exists in Chrome. It has been removed.`
+    });
+    return;
+  }
+  
   let contentScriptLoaded = await checkContentScriptLoaded(tab.tabId);
   if (!contentScriptLoaded) {
     console.log('Content script not loaded, attempting injection...');
     contentScriptLoaded = await injectContentScript(tab.tabId);
   }
   if (!contentScriptLoaded) {
-    console.error('Content script still not loaded in tab:', tab.tabId);
-    wsSend({
-      type: 'command_failed',
-      cmd_id,
-      error: `Content script not loaded in tab ${tab_id}. Try reloading the tab.`
-    });
+    const tabStillExists = await verifyAndCleanupTab(tab.tabId, tab_id);
+    if (!tabStillExists) {
+      wsSend({
+        type: 'command_failed',
+        cmd_id,
+        error: `Tab ${tab_id} no longer exists in Chrome. It has been removed.`
+      });
+    } else {
+      console.error('Content script still not loaded in tab:', tab.tabId);
+      wsSend({
+        type: 'command_failed',
+        cmd_id,
+        error: `Content script not loaded in tab ${tab_id}. Try reloading the tab.`
+      });
+    }
     return;
   }
   
@@ -503,11 +535,24 @@ async function processCommand(msg) {
     }
   } catch (error) {
     console.error('Command failed:', actualCmdId, error);
-    wsSend({
-      type: 'command_failed',
-      cmd_id: actualCmdId,
-      error: error.message
-    });
+    
+    const errorMsg = error.message || '';
+    if (errorMsg.includes('Receiving end does not exist') || 
+        errorMsg.includes('No tab with id') ||
+        errorMsg.includes('Tab not found')) {
+      await verifyAndCleanupTab(tab.tabId, tab_id);
+      wsSend({
+        type: 'command_failed',
+        cmd_id: actualCmdId,
+        error: `Tab ${tab_id} no longer exists in Chrome. It has been removed.`
+      });
+    } else {
+      wsSend({
+        type: 'command_failed',
+        cmd_id: actualCmdId,
+        error: error.message
+      });
+    }
   }
 }
 
