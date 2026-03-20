@@ -30,6 +30,13 @@ var (
 	serverMode  = flag.Bool("server", false, "Run as HTTP server for Chrome extension")
 	killFlag    = flag.Bool("kill", false, "Kill the background daemon server")
 	port        = flag.Int("port", 9223, "HTTP server port")
+	versionFlag = flag.Bool("version", false, "Print version")
+)
+
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
 )
 
 type CommandResult struct {
@@ -548,6 +555,11 @@ func waitForDaemon(maxWait time.Duration) error {
 
 func main() {
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("chrome-mcp version %s (commit: %s, date: %s)\n", version, commit, date)
+		return
+	}
 
 	debug := *debugFlag || *verboseFlag
 
