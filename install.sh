@@ -44,7 +44,7 @@ case "$OS" in
         ;;
 esac
 
-FILENAME="${BINARY_NAME}-${OS}-${ARCH}"
+FILENAME="${BINARY_NAME}-${OS}-${ARCH}.tar.gz"
 EXTENSION_FILE="chrome-mcp-extension.zip"
 
 if [ "$VERSION" = "latest" ]; then
@@ -66,7 +66,7 @@ EXTENSION_URL="https://github.com/${REPO}/releases/download/${VERSION_TAG}/${EXT
 
 echo "Downloading chrome-mcp v${VERSION} for ${OS}/${ARCH}..."
 
-curl -sSL -o "${BINARY_NAME}" "$URL"
+curl -sSL -o "${FILENAME}" "$URL"
 
 if command -v sha256sum >/dev/null 2>&1; then
     CHECKSUM_URL="https://github.com/${REPO}/releases/download/${VERSION_TAG}/${FILENAME}.sha256"
@@ -74,6 +74,8 @@ if command -v sha256sum >/dev/null 2>&1; then
     curl -sSL "$CHECKSUM_URL" | sha256sum -c --status - || echo "Checksum verification skipped (not available)"
 fi
 
+tar -xzf "${FILENAME}"
+rm -f "${FILENAME}"
 chmod +x "${BINARY_NAME}"
 
 mkdir -p "$INSTALL_DIR"
@@ -90,7 +92,7 @@ fi
 
 echo ""
 echo "Downloading Chrome extension..."
-EXTENSION_DIR="${HOME}/.chrome-mcp"
+EXTENSION_DIR="${HOME}/chrome-mcp"
 mkdir -p "$EXTENSION_DIR"
 
 if curl -sSL -o "${EXTENSION_DIR}/${EXTENSION_FILE}" "$EXTENSION_URL"; then
