@@ -3,7 +3,7 @@
 
 # Chrome MCP Controller
 
-An MCP (Model Context Protocol) server that allows AI agents (like godex) to control Chrome tabs via a browser extension.
+A MCP (Model Context Protocol) server that allows AI agents (like godex) to control Chrome tabs via a browser extension.
 
 ## Installation
 
