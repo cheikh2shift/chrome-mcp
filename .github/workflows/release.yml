@@ -34,6 +34,7 @@ jobs:
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -ldflags="$ldflags" -o chrome-mcp-linux-amd64 ./cmd/chrome-mcp/
           tar -czvf chrome-mcp-linux-amd64.tar.gz chrome-mcp-linux-amd64
+          sha256sum chrome-mcp-linux-amd64.tar.gz > chrome-mcp-linux-amd64.tar.gz.sha256
 
       - name: Build Linux arm64
         env:
@@ -44,6 +45,7 @@ jobs:
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -ldflags="$ldflags" -o chrome-mcp-linux-arm64 ./cmd/chrome-mcp/
           tar -czvf chrome-mcp-linux-arm64.tar.gz chrome-mcp-linux-arm64
+          sha256sum chrome-mcp-linux-arm64.tar.gz > chrome-mcp-linux-arm64.tar.gz.sha256
 
       - name: Build Darwin amd64
         env:
@@ -54,6 +56,7 @@ jobs:
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -ldflags="$ldflags" -o chrome-mcp-darwin-amd64 ./cmd/chrome-mcp/
           tar -czvf chrome-mcp-darwin-amd64.tar.gz chrome-mcp-darwin-amd64
+          sha256sum chrome-mcp-darwin-amd64.tar.gz > chrome-mcp-darwin-amd64.tar.gz.sha256
 
       - name: Build Darwin arm64
         env:
@@ -64,6 +67,7 @@ jobs:
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -ldflags="$ldflags" -o chrome-mcp-darwin-arm64 ./cmd/chrome-mcp/
           tar -czvf chrome-mcp-darwin-arm64.tar.gz chrome-mcp-darwin-arm64
+          sha256sum chrome-mcp-darwin-arm64.tar.gz > chrome-mcp-darwin-arm64.tar.gz.sha256
 
       - name: Build Windows amd64
         env:
@@ -74,6 +78,7 @@ jobs:
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           go build -ldflags="$ldflags" -o chrome-mcp-windows-amd64.exe ./cmd/chrome-mcp/
           zip chrome-mcp-windows-amd64.zip chrome-mcp-windows-amd64.exe
+          sha256sum chrome-mcp-windows-amd64.zip > chrome-mcp-windows-amd64.zip.sha256
 
       - name: Update manifest version
         run: |
@@ -117,10 +122,15 @@ jobs:
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           files: |
             chrome-mcp-linux-amd64.tar.gz
+            chrome-mcp-linux-amd64.tar.gz.sha256
             chrome-mcp-linux-arm64.tar.gz
+            chrome-mcp-linux-arm64.tar.gz.sha256
             chrome-mcp-darwin-amd64.tar.gz
+            chrome-mcp-darwin-amd64.tar.gz.sha256
             chrome-mcp-darwin-arm64.tar.gz
+            chrome-mcp-darwin-arm64.tar.gz.sha256
             chrome-mcp-windows-amd64.zip
+            chrome-mcp-windows-amd64.zip.sha256
             chrome-mcp-extension.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
