@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MCP Test Page</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    .box { margin: 15px 0; padding: 10px; border: 1px solid #ccc; }
+    button { margin: 5px; }
+    #hidden { display: none; color: green; }
+  </style>
+</head>
+<body>
+
+  <h1>MCP Browser Automation Test</h1>
+
+  <!-- Buttons -->
+  <div class="box">
+    <h2>Buttons</h2>
+    <button id="login-btn">Login</button>
+    <button id="load-btn">Load Content</button>
+  </div>
+
+  <!-- Form -->
+  <div class="box">
+    <h2>Form</h2>
+    <label>Email:</label>
+    <input type="email" id="email" placeholder="Enter email"><br><br>
+    
+    <label>Password:</label>
+    <input type="password" id="password" placeholder="Enter password"><br><br>
+    
+    <button id="submit-btn">Submit</button>
+  </div>
+
+  <!-- Dynamic Content -->
+  <div class="box">
+    <h2>Dynamic Content</h2>
+    <div id="content">Nothing loaded yet...</div>
+  </div>
+
+  <!-- List for extraction -->
+  <div class="box">
+    <h2>Products</h2>
+    <ul id="products">
+      <li class="product">Laptop - $1200</li>
+      <li class="product">Phone - $800</li>
+      <li class="product">Tablet - $600</li>
+    </ul>
+  </div>
+
+  <!-- Hidden element -->
+  <div class="box">
+    <h2>Hidden Element</h2>
+    <button onclick="showHidden()">Reveal Message</button>
+    <p id="hidden">🎉 Secret message revealed!</p>
+  </div>
+
+  <script>
+    // Simulate login click
+    document.getElementById("login-btn").addEventListener("click", () => {
+      alert("Login button clicked!");
+    });
+
+    // Simulate dynamic loading
+    document.getElementById("load-btn").addEventListener("click", () => {
+      document.getElementById("content").innerText = "Loading...";
+      setTimeout(() => {
+        document.getElementById("content").innerText = "✅ Content loaded!";
+      }, 2000);
+    });
+
+    // Form submit
+    document.getElementById("submit-btn").addEventListener("click", () => {
+      const email = document.getElementById("email").value;
+      alert("Submitted: " + email);
+    });
+
+    function showHidden() {
+      document.getElementById("hidden").style.display = "block";
+    }
+  </script>
+
+</body>
+</html>
