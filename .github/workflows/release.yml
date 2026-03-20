@@ -111,7 +111,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref }}
-          name: ${{ github.ref }}
+          name: ${{ github.ref_name }}
           body_path: ${{ steps.changelog.outputs.body_path }}
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
