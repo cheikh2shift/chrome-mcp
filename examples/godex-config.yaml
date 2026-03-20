@@ -1,0 +1,28 @@
+# Chrome MCP Configuration for godex
+#
+# USAGE:
+# 1. Add to ~/.godex/providers.yaml under mcp_servers
+# 2. Set start: true so chrome-mcp runs independently
+# 3. chrome-mcp runs HTTP server, Chrome extension connects, godex connects via MCP
+#
+# IMPORTANT: The chrome extension and godex MUST use the same chrome-mcp process.
+# Use `start: true` so godex doesn't try to spawn its own MCP client.
+# The chrome extension must be connected to the same server instance.
+
+providers:
+  - name: ollama
+    type: ollama
+    endpoint: http://localhost:11434
+    model: minimax-m2.7:cloud
+    description: Ollama with Chrome MCP
+    mcp_servers:
+      - name: chrome
+        command: "/usr/local/bin/chrome-mcp"
+        args: ["--debug"]
+        transport: "stdio"
+        start: true
+        # When start: true, godex will NOT manage this server.
+        # You must start chrome-mcp manually before using godex.
+        # The chrome extension should be connected to the same server.
+
+default_provider: ollama

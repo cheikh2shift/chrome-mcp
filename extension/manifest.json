@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome MCP Controller",
+  "version": "1.0.0",
+  "description": "Control Chrome tabs via MCP server for AI agents",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost:9223/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Chrome MCP Controller"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
