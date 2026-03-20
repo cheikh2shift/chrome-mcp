@@ -7,33 +7,34 @@ An MCP (Model Context Protocol) server that allows AI agents (like godex) to con
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                          MCP Mode (for godex)                                   │
-│  ┌─────────────┐    stdio     ┌──────────────┐    HTTP   ┌──────────────────┐   │
-│  │   godex     │◄────────────►│  chrome-mcp  │◄─────────►│  Daemon Server   │   │
-│  │  (AI Agent) │              │              │           │  (port 9223)     │   │
-│  └─────────────┘              └──────────────┘           └────────┬─────────┘   │
-└───────────────────────────────────────────────────────────────┼─────────────────┘
-                                                                │ SQLite
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                        Chrome Extension                                         │
-│  ┌─────────────────────┐         WebSocket         ┌────────────────────────┐   │
-│  │   background.js     │◄─────────────────────────►│   Daemon Server        │   │
-│  │   (service worker)  │   real-time push          │   /ws                  │   │
-│  └──────────┬──────────┘                           └───────────┬────────────┘   │
-│             │ chrome.tabs.sendMessage                          │                │
-│             ▼                                                  │                │
-│  ┌─────────────────────┐                                       │                │
-│  │     content.js      │◄──────────────────────────────────────┘                │
-│  │  (page context)     │  executes JS in page                                   │
-│  └─────────────────────┘                                                        │
-└─────────────────────────────────────────────────────────────────────────────────┘
+│  ┌─────────────┐    stdio     ┌──────────────┐         ┌──────────────────────┐ │
+│  │   godex     │◄────────────►│  chrome-mcp  │◄──WS──►│    Daemon Server      │ │
+│  │  (AI Agent)  │             │              │  /ws/mcp│    (port 9223)       │ │
+│  └─────────────┘              └──────────────┘         └──────────┬───────────┘ │
+└────────────────────────────────────────────────────────────┬──────┴─────────────┘
+                                                    
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                        Chrome Extension                                       │
+│  ┌─────────────────────┐         WebSocket         ┌────────────────────────┐ │
+│  │   background.js     │◄──────────────────────────│    Daemon Server       │ │
+│  │   (service worker)  │   /ws/extension push      │    (port 9223)         │ │
+│  └──────────┬──────────┘                           └───────────┬────────────┘ │
+│             │ chrome.tabs.sendMessage                          │              │
+│             ▼                                                  │              │
+│  ┌─────────────────────┐                                       │              │
+│  │     content.js      │◄──────────────────────────────────────┘              │
+│  │  (page context)     │  executes JS in page                                 │
+│  └─────────────────────┘                                                      │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## How It Works
 
 1. **godex starts chrome-mcp** → Automatically starts daemon server in background
-2. **Daemon** → HTTP server + WebSocket server on port 9223, manages SQLite state
-3. **Chrome Extension** → Connects via WebSocket for real-time command push
-4. **MCP commands** → Daemon stores command, pushes via WebSocket to extension, receives result via WebSocket
+2. **Daemon** → HTTP + WebSocket server on port 9223
+3. **MCP → Daemon** → Opens dedicated WebSocket connection (`/ws/mcp`)
+4. **Extension → Daemon** → Opens WebSocket connection (`/ws/extension`) for push commands
+5. **Command Flow** → Daemon pushes command to extension via WebSocket, extension executes and returns result directly back through the same WebSocket connection
 
 ## Installation
 
@@ -87,6 +88,7 @@ providers:
       - name: chrome
         command: "/usr/local/bin/chrome-mcp"
         transport: "stdio"
+        start: true
 
 default_provider: ollama
 ```

@@ -125,10 +125,13 @@ window.handleTabAction = async function(chromeTabId, title, url, shouldConnect) 
 async function connectTab(chromeTabId, title, url) {
   console.log('Connecting tab:', { chromeTabId, title, url });
   try {
+    const tabInfo = await chrome.tabs.get(chromeTabId);
+    const windowId = tabInfo.windowId;
+    
     const response = await fetch(`${SERVER_URL}/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tab_id: chromeTabId, title, url })
+      body: JSON.stringify({ tab_id: chromeTabId, title, url, windowId })
     });
     const data = await response.json();
     console.log('Register response:', data);
@@ -141,7 +144,8 @@ async function connectTab(chromeTabId, title, url) {
         id: data.result.id,
         tabId: chromeTabId,
         title,
-        url
+        url,
+        windowId
       });
       
       return data.result.id;

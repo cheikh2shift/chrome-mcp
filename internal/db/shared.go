@@ -12,6 +12,7 @@ import (
 type Tab struct {
 	ID        string    `json:"id"`
 	ChromeID  int       `json:"chrome_tab_id"`
+	WindowID  int       `json:"window_id"`
 	Title     string    `json:"title"`
 	URL       string    `json:"url"`
 	IsActive  bool      `json:"is_active"`
@@ -57,6 +58,7 @@ func (s *SharedDB) initSchema() error {
 	CREATE TABLE IF NOT EXISTS tabs (
 		id TEXT PRIMARY KEY,
 		chrome_id INTEGER NOT NULL,
+		window_id INTEGER DEFAULT 0,
 		title TEXT,
 		url TEXT,
 		is_active INTEGER DEFAULT 0,
@@ -189,9 +191,9 @@ func (s *SharedDB) AddTab(tab *Tab) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO tabs (id, chrome_id, title, url, is_active, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, tab.ID, tab.ChromeID, tab.Title, tab.URL, tab.IsActive, tab.CreatedAt)
+		INSERT OR REPLACE INTO tabs (id, chrome_id, window_id, title, url, is_active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, tab.ID, tab.ChromeID, tab.WindowID, tab.Title, tab.URL, tab.IsActive, tab.CreatedAt)
 	return err
 }
 
@@ -208,7 +210,7 @@ func (s *SharedDB) ListTabs() ([]*Tab, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT id, chrome_id, title, url, is_active, created_at 
+		SELECT id, chrome_id, window_id, title, url, is_active, created_at 
 		FROM tabs 
 		ORDER BY created_at DESC
 	`)
@@ -220,7 +222,7 @@ func (s *SharedDB) ListTabs() ([]*Tab, error) {
 	var tabs []*Tab
 	for rows.Next() {
 		tab := &Tab{}
-		err := rows.Scan(&tab.ID, &tab.ChromeID, &tab.Title, &tab.URL, &tab.IsActive, &tab.CreatedAt)
+		err := rows.Scan(&tab.ID, &tab.ChromeID, &tab.WindowID, &tab.Title, &tab.URL, &tab.IsActive, &tab.CreatedAt)
 		if err != nil {
 			return nil, err
 		}

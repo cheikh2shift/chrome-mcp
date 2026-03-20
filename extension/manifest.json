@@ -9,7 +9,8 @@
     "tabs"
   ],
   "host_permissions": [
-    "http://localhost:9223/*"
+    "http://localhost:9223/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"

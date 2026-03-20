@@ -32,6 +32,9 @@
           case 'capture_viewport':
             return captureViewport();
 
+          case 'ping':
+            return { type: 'pong', loaded: true, url: window.location.href };
+
           default:
             return { error: `Unknown message type: ${message.type}` };
         }

@@ -43,7 +43,6 @@ type WSHub struct {
 	mcpClients       map[*websocket.Conn]chan *CommandResult
 	register         chan *websocket.Conn
 	unregister       chan *websocket.Conn
-	pendingCmds      map[string]*PendingCommand
 	mu               sync.RWMutex
 }
 
@@ -53,7 +52,6 @@ func newWSHub() *WSHub {
 		mcpClients:       make(map[*websocket.Conn]chan *CommandResult),
 		register:         make(chan *websocket.Conn),
 		unregister:       make(chan *websocket.Conn),
-		pendingCmds:      make(map[string]*PendingCommand),
 	}
 }
 
@@ -92,7 +90,7 @@ func (h *WSHub) BroadcastToExtensions(msg []byte) {
 	}
 }
 
-func (h *WSHub) HandleMCPClient(conn *websocket.Conn) {
+func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 	h.mu.Lock()
 	resultChan := make(chan *CommandResult, 1)
 	h.mcpClients[conn] = resultChan
@@ -103,6 +101,21 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn) {
 		delete(h.mcpClients, conn)
 		close(resultChan)
 		h.mu.Unlock()
+	}()
+
+	go func() {
+		for result := range resultChan {
+			msg := map[string]interface{}{
+				"type":   "result",
+				"cmd_id": result.cmdID,
+				"status": result.Status,
+				"result": result.Result,
+				"error":  result.Error,
+			}
+			if err := conn.WriteJSON(msg); err != nil {
+				return
+			}
+		}
 	}()
 
 	for {
@@ -119,22 +132,48 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn) {
 		msgType, _ := msg["type"].(string)
 
 		switch msgType {
-		case "command_complete":
+		case "command":
 			cmdID, _ := msg["cmd_id"].(string)
+			tabID, _ := msg["tab_id"].(string)
+			cmdType, _ := msg["cmd_type"].(string)
+			params, _ := msg["params"].(string)
+
+			cmd := &chromedb.Command{
+				ID:        cmdID,
+				TabID:     tabID,
+				Type:      cmdType,
+				Params:    params,
+				CreatedAt: time.Now(),
+			}
+			db.AddCommand(cmd)
+
+			var paramsObj map[string]interface{}
+			json.Unmarshal([]byte(params), &paramsObj)
+			if paramsObj == nil {
+				paramsObj = make(map[string]interface{})
+			}
+			paramsObj["_type"] = cmdType
+			paramsObj["_cmd_id"] = cmdID
+
+			h.sendToTab(tabID, cmdID, "command", paramsObj)
+			debugLog("Forwarded command %s to extension for tab %s", cmdID, tabID)
+
+		case "command_complete", "command_failed":
+			cmdID, _ := msg["cmd_id"].(string)
+			var errMsg string
+			var status string
+			if msgType == "command_failed" {
+				errMsg, _ = msg["error"].(string)
+				status = "failed"
+			} else {
+				status = "completed"
+			}
 			result, _ := msg["result"]
 			resultStr, _ := json.Marshal(result)
 			h.BroadcastResult(&CommandResult{
 				cmdID:  cmdID,
-				Status: "completed",
+				Status: status,
 				Result: string(resultStr),
-			})
-
-		case "command_failed":
-			cmdID, _ := msg["cmd_id"].(string)
-			errMsg, _ := msg["error"].(string)
-			h.BroadcastResult(&CommandResult{
-				cmdID:  cmdID,
-				Status: "failed",
 				Error:  errMsg,
 			})
 		}
@@ -423,15 +462,17 @@ func handleRegister(db *chromedb.SharedDB, hub *WSHub, debug bool) http.HandlerF
 
 		body, _ := io.ReadAll(r.Body)
 		var data struct {
-			TabID int    `json:"tab_id"`
-			Title string `json:"title"`
-			URL   string `json:"url"`
+			TabID    int    `json:"tab_id"`
+			Title    string `json:"title"`
+			URL      string `json:"url"`
+			WindowID int    `json:"windowId"`
 		}
 		json.Unmarshal(body, &data)
 
 		tab := &chromedb.Tab{
 			ID:       fmt.Sprintf("tab_%d", data.TabID),
 			ChromeID: data.TabID,
+			WindowID: data.WindowID,
 			Title:    data.Title,
 			URL:      data.URL,
 		}
@@ -444,6 +485,7 @@ func handleRegister(db *chromedb.SharedDB, hub *WSHub, debug bool) http.HandlerF
 		hub.sendToTab(tab.ID, "", "tab_registered", map[string]interface{}{
 			"id":            tab.ID,
 			"chrome_tab_id": tab.ChromeID,
+			"window_id":     tab.WindowID,
 			"title":         tab.Title,
 			"url":           tab.URL,
 		})
@@ -580,7 +622,7 @@ func handleMCPWebSocket(hub *WSHub, db *chromedb.SharedDB, debug bool) http.Hand
 		}
 		defer conn.Close()
 
-		hub.HandleMCPClient(conn)
+		hub.HandleMCPClient(conn, db)
 	}
 }
 
@@ -604,7 +646,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"list_connected_tabs",
-			mcp.WithDescription("List all tabs connected via Chrome extension"),
+			mcp.WithDescription("List all tabs connected via Chrome extension. IMPORTANT: If you don't know any tab IDs, call this first to see available tabs."),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabs, err := getTabsFromDaemon(debug)
@@ -628,7 +670,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"get_tab_info",
-			mcp.WithDescription("Get info about a connected tab"),
+			mcp.WithDescription("Get info about a connected tab. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -650,7 +692,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"execute_script",
-			mcp.WithDescription("Execute JavaScript in a connected tab"),
+			mcp.WithDescription("Execute JavaScript in a connected tab. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("script", mcp.Required(), mcp.Description("JavaScript code to execute")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(30000), mcp.Description("Timeout in milliseconds")),
@@ -670,7 +712,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"get_page_structure",
-			mcp.WithDescription("Get structured DOM overview of the page"),
+			mcp.WithDescription("Get structured DOM overview of the page. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithNumber("max_depth", mcp.DefaultNumber(3), mcp.Description("Maximum depth to traverse")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
@@ -691,7 +733,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"extract_page_content",
-			mcp.WithDescription("Extract readable text, links, forms, images from page"),
+			mcp.WithDescription("Extract readable text, links, forms, images from page. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.DefaultString(""), mcp.Description("Optional CSS selector")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
@@ -712,7 +754,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"get_page_source",
-			mcp.WithDescription("Get raw HTML source"),
+			mcp.WithDescription("Get raw HTML source. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithNumber("max_length", mcp.DefaultNumber(50000), mcp.Description("Max characters")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
@@ -733,7 +775,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"find_elements",
-			mcp.WithDescription("Find DOM elements using CSS/XPath"),
+			mcp.WithDescription("Find DOM elements using CSS/XPath. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS or XPath selector")),
 			mcp.WithString("selector_type", mcp.DefaultString("css"), mcp.Description("'css' or 'xpath'")),
@@ -756,7 +798,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"get_element_details",
-			mcp.WithDescription("Get detailed element info"),
+			mcp.WithDescription("Get detailed element info. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
@@ -777,7 +819,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"wait_for_element",
-			mcp.WithDescription("Wait for element to appear"),
+			mcp.WithDescription("Wait for element to appear. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(10000), mcp.Description("Timeout in milliseconds")),
@@ -798,7 +840,7 @@ func runMCPServer(debug bool) {
 	mcpServer.AddTool(
 		mcp.NewTool(
 			"take_screenshot",
-			mcp.WithDescription("Capture page screenshot"),
+			mcp.WithDescription("Capture page screenshot. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
 		),
@@ -832,12 +874,14 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 	defer conn.Close()
 
 	resultChan := make(chan *CommandResult, 1)
+	done := make(chan struct{})
 
 	go func() {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				break
+				close(done)
+				return
 			}
 
 			var msg map[string]interface{}
@@ -846,16 +890,25 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 			}
 
 			msgType, _ := msg["type"].(string)
-			if msgType == "result" || msgType == "completed" {
-				cmdID, _ := msg["cmd_id"].(string)
+			debugLog("MCP WS received: type=%s, msg=%s", msgType, string(message))
+
+			if msgType == "result" || msgType == "completed" || msgType == "command_complete" || msgType == "command_failed" {
+				resultCmdID, _ := msg["cmd_id"].(string)
 				status, _ := msg["status"].(string)
 				result, _ := msg["result"]
+				errMsg, _ := msg["error"].(string)
 				resultStr, _ := json.Marshal(result)
 
-				resultChan <- &CommandResult{
-					cmdID:  cmdID,
+				cmdResult := &CommandResult{
+					cmdID:  resultCmdID,
 					Status: status,
 					Result: string(resultStr),
+					Error:  errMsg,
+				}
+
+				select {
+				case resultChan <- cmdResult:
+				default:
 				}
 				return
 			}
@@ -863,26 +916,27 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 	}()
 
 	command := map[string]interface{}{
-		"type":   cmdType,
-		"tab_id": tabID,
-		"cmd_id": cmdID,
-		"params": params,
+		"type":     "command",
+		"cmd_type": cmdType,
+		"tab_id":   tabID,
+		"cmd_id":   cmdID,
+		"params":   params,
 	}
 	if err := conn.WriteJSON(command); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to send command: %v", err)), nil
 	}
 
-	if debug {
-		debugLog("%s: %s (tab=%s) -> waiting for result via WS", cmdType, cmdID, tabID)
-	}
+	debugLog("%s: %s (tab=%s) -> sent command, waiting for result", cmdType, cmdID, tabID)
 
 	select {
 	case result := <-resultChan:
+		debugLog("MCP WS got result: status=%s, cmdID=%s", result.Status, result.cmdID)
 		if result.Status == "completed" || result.Status == "success" {
 			return mcp.NewToolResultText(result.Result), nil
 		}
 		return mcp.NewToolResultError(result.Error), nil
-
+	case <-done:
+		return mcp.NewToolResultError("connection closed"), nil
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
 		return mcp.NewToolResultError("timeout waiting for result"), nil
 	}
@@ -905,9 +959,16 @@ func getTabsFromDaemon(debug bool) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("API error")
 	}
 
-	tabs, ok := result["result"].([]map[string]interface{})
+	resultList, ok := result["result"].([]interface{})
 	if !ok {
 		return nil, fmt.Errorf("invalid response")
+	}
+
+	tabs := make([]map[string]interface{}, 0, len(resultList))
+	for _, item := range resultList {
+		if tab, ok := item.(map[string]interface{}); ok {
+			tabs = append(tabs, tab)
+		}
 	}
 
 	return tabs, nil

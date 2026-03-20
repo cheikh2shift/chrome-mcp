@@ -95,6 +95,7 @@ dist
 .temp
 .cache
 vendors/
+bin/
 # Sveltekit cache directory
 .svelte-kit/
 

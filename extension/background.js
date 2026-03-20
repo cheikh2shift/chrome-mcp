@@ -70,18 +70,38 @@ async function syncTabsFromDaemon() {
   try {
     const response = await apiRequest('/tabs');
     if (response.type === 'success' && Array.isArray(response.result)) {
+      const newConnectedTabs = new Map();
+      const toRemove = [];
+      
+      for (const tab of response.result) {
+        const chromeTabId = tab.chrome_tab_id || tab.tabId;
+        
+        if (chromeTabId && typeof chromeTabId === 'number') {
+          try {
+            await chrome.tabs.get(chromeTabId);
+            newConnectedTabs.set(tab.id, {
+              id: tab.id,
+              tabId: chromeTabId,
+              title: tab.title || '',
+              url: tab.url || '',
+              windowId: tab.windowId || 0
+            });
+          } catch (e) {
+            console.log('Tab no longer exists in Chrome:', chromeTabId, 'removing from daemon');
+            toRemove.push(tab.id);
+          }
+        }
+      }
+      
       connectedTabs.clear();
-      response.result.forEach(tab => {
-        connectedTabs.set(tab.id, {
-          id: tab.id,
-          tabId: tab.chrome_tab_id || tab.tabId,
-          title: tab.title || '',
-          url: tab.url || '',
-          windowId: tab.windowId || 0
-        });
-      });
+      newConnectedTabs.forEach((v, k) => connectedTabs.set(k, v));
+      
+      for (const id of toRemove) {
+        apiRequest('/unregister', 'POST', { id }).catch(() => {});
+      }
+      
       updateBadge();
-      console.log('Synced tabs from daemon:', connectedTabs.size);
+      console.log('Synced tabs from daemon:', connectedTabs.size, 'removed:', toRemove.length);
     }
   } catch (e) {
     console.warn('Failed to sync tabs:', e.message);
@@ -128,6 +148,34 @@ chrome.runtime.onStartup.addListener(() => {
   startTabSync();
 });
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  let removed = false;
+  connectedTabs.forEach((tab, key) => {
+    if (tab.tabId === tabId) {
+      connectedTabs.delete(key);
+      apiRequest('/unregister', 'POST', { id: key }).catch(() => {});
+      removed = true;
+      console.log('Tab removed:', key);
+    }
+  });
+  if (removed) updateBadge();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading' || changeInfo.url) {
+    let unregistered = false;
+    connectedTabs.forEach((tab, key) => {
+      if (tab.tabId === tabId) {
+        connectedTabs.delete(key);
+        apiRequest('/unregister', 'POST', { id: key }).catch(() => {});
+        unregistered = true;
+        console.log('Tab unregistered due to navigation/refresh:', key);
+      }
+    });
+    if (unregistered) updateBadge();
+  }
+});
+
 let tabSyncInterval = null;
 
 function startTabSync() {
@@ -152,19 +200,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           };
           
           connectedTabs.set(tabData.id, tabData);
+          console.log('Tab registered:', tabData.id, 'url:', message.url);
           
           try {
-            await apiRequest('/register', 'POST', {
+            const registered = await apiRequest('/register', 'POST', {
               tab_id: message.tabId,
               title: message.title || 'Unknown',
               url: message.url || ''
             });
+            console.log('Tab registered with daemon:', registered);
           } catch (e) {
             console.warn('Could not register tab with server:', e.message);
           }
           
+          let contentScriptLoaded = await checkContentScriptLoaded(message.tabId);
+          if (!contentScriptLoaded) {
+            console.log('Content script not loaded, attempting injection...');
+            contentScriptLoaded = await injectContentScript(message.tabId);
+          }
+          console.log('Content script loaded:', contentScriptLoaded, 'for tab:', message.tabId);
+          
           updateBadge();
-          return { success: true, id: tabData.id };
+          return { success: true, id: tabData.id, contentScriptLoaded };
         }
 
         case 'tab_registered': {
@@ -234,6 +291,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return { error: e.message };
           }
 
+        case 'inject_content_script':
+          try {
+            const injected = await injectContentScript(message.tabId);
+            return { success: injected, tabId: message.tabId };
+          } catch (e) {
+            return { error: e.message };
+          }
+
         default:
           return { error: `Unknown message type: ${message.type}` };
       }
@@ -247,15 +312,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function sendTabMessage(tabId, message) {
+  console.log('Sending message to tab', tabId, ':', JSON.stringify(message).substring(0, 200));
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
       if (chrome.runtime.lastError) {
+        console.error('sendTabMessage error:', chrome.runtime.lastError.message);
         reject(new Error(chrome.runtime.lastError.message));
       } else {
+        console.log('Got response from tab', tabId, ':', JSON.stringify(response).substring(0, 200));
         resolve(response);
       }
     });
   });
+}
+
+async function checkContentScriptLoaded(tabId) {
+  try {
+    const result = await sendTabMessage(tabId, { type: 'ping' });
+    return result && result.loaded === true;
+  } catch (e) {
+    console.log('Content script not loaded in tab', tabId, ':', e.message);
+    return false;
+  }
+}
+
+async function injectContentScript(tabId) {
+  try {
+    if (typeof chrome.scripting !== 'undefined' && chrome.scripting.executeScript) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content.js']
+      });
+      console.log('Content script injected into tab', tabId);
+      await new Promise(r => setTimeout(r, 500));
+      return await checkContentScriptLoaded(tabId);
+    }
+  } catch (e) {
+    console.error('Failed to inject content script:', e.message);
+  }
+  return false;
 }
 
 function updateBadge() {
@@ -265,8 +360,8 @@ function updateBadge() {
 }
 
 async function processCommand(msg) {
-  const { tab_id, cmd_id, data } = msg;
-  console.log('Processing command:', cmd_id, 'type:', data?._type, 'tab_id:', tab_id);
+  const { tab_id, cmd_id, cmd_type, data } = msg;
+  console.log('Processing command:', cmd_id, 'type:', cmd_type || data?._type, 'tab_id:', tab_id);
   
   const tab = connectedTabs.get(tab_id);
   if (!tab) {
@@ -289,7 +384,22 @@ async function processCommand(msg) {
     return;
   }
   
-  const cmdType = data?._type || data?.type;
+  let contentScriptLoaded = await checkContentScriptLoaded(tab.tabId);
+  if (!contentScriptLoaded) {
+    console.log('Content script not loaded, attempting injection...');
+    contentScriptLoaded = await injectContentScript(tab.tabId);
+  }
+  if (!contentScriptLoaded) {
+    console.error('Content script still not loaded in tab:', tab.tabId);
+    wsSend({
+      type: 'command_failed',
+      cmd_id,
+      error: `Content script not loaded in tab ${tab_id}. Try reloading the tab.`
+    });
+    return;
+  }
+  
+  const cmdType = cmd_type || data?._type;
   const actualCmdId = data?._cmd_id || cmd_id;
   
   try {
@@ -352,7 +462,7 @@ async function processCommand(msg) {
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
           format: 'png'
         });
-        result = { type: 'result', result: { dataUrl } };
+        result = { success: true, dataUrl };
         break;
         
       default:
@@ -364,82 +474,7 @@ async function processCommand(msg) {
         return;
     }
     
-    switch (data?.type) {
-      case 'execute_script':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'execute_script',
-          script: data.params,
-          await_promise: true
-        });
-        break;
-        
-      case 'get_page_structure':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'get_page_structure',
-          max_depth: params.max_depth || 3
-        });
-        break;
-        
-      case 'extract_page_content':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'extract_content',
-          selector: params.selector || null
-        });
-        break;
-        
-      case 'get_page_source':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'get_page_source',
-          max_length: params.max_length || 50000
-        });
-        break;
-        
-      case 'find_elements':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'find_elements',
-          selector: params.selector,
-          selector_type: params.selector_type || 'css'
-        });
-        break;
-        
-      case 'get_element_details':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'get_element_details',
-          selector: params.selector
-        });
-        break;
-        
-      case 'wait_for_element':
-        result = await sendTabMessage(tab.tabId, {
-          type: 'wait_for_element',
-          selector: params.selector,
-          timeout_ms: params.timeout_ms || 10000
-        });
-        break;
-        
-      case 'take_screenshot':
-        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-          format: 'png'
-        });
-        result = { type: 'result', result: { dataUrl } };
-        break;
-        
-      default:
-        wsSend({
-          type: 'command_failed',
-          cmd_id,
-          error: `Unknown command type: ${data?.type}`
-        });
-        return;
-    }
-    
-    if (result && result.type === 'result') {
-      wsSend({
-        type: 'command_complete',
-        cmd_id: actualCmdId,
-        result: result.result
-      });
-    } else if (result && result.type === 'error') {
+    if (result && result.error) {
       wsSend({
         type: 'command_failed',
         cmd_id: actualCmdId,
