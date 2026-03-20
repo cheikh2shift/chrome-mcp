@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,9 +39,18 @@ type CommandResult struct {
 	Error  string
 }
 
+type CommandMeta struct {
+	CmdType   string
+	TabID     string
+	StartedAt time.Time
+}
+
 type WSHub struct {
 	extensionClients map[*websocket.Conn]bool
 	mcpClients       map[*websocket.Conn]chan *CommandResult
+	pendingCmdOwner  map[string]*websocket.Conn
+	cmdsByConn       map[*websocket.Conn]map[string]struct{}
+	commandMeta      map[string]CommandMeta
 	register         chan *websocket.Conn
 	unregister       chan *websocket.Conn
 	mu               sync.RWMutex
@@ -50,6 +60,9 @@ func newWSHub() *WSHub {
 	return &WSHub{
 		extensionClients: make(map[*websocket.Conn]bool),
 		mcpClients:       make(map[*websocket.Conn]chan *CommandResult),
+		pendingCmdOwner:  make(map[string]*websocket.Conn),
+		cmdsByConn:       make(map[*websocket.Conn]map[string]struct{}),
+		commandMeta:      make(map[string]CommandMeta),
 		register:         make(chan *websocket.Conn),
 		unregister:       make(chan *websocket.Conn),
 	}
@@ -69,6 +82,13 @@ func (h *WSHub) run() {
 				delete(h.extensionClients, conn)
 				conn.Close()
 			}
+			if cmdSet, ok := h.cmdsByConn[conn]; ok {
+				for cmdID := range cmdSet {
+					delete(h.pendingCmdOwner, cmdID)
+					delete(h.commandMeta, cmdID)
+				}
+				delete(h.cmdsByConn, conn)
+			}
 			if ch, ok := h.mcpClients[conn]; ok {
 				delete(h.mcpClients, conn)
 				close(ch)
@@ -80,24 +100,49 @@ func (h *WSHub) run() {
 
 func (h *WSHub) BroadcastToExtensions(msg []byte) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	clients := make([]*websocket.Conn, 0, len(h.extensionClients))
 	for client := range h.extensionClients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+
+	var stale []*websocket.Conn
+	for _, client := range clients {
+		_ = client.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		err := client.WriteMessage(websocket.TextMessage, msg)
+		_ = client.SetWriteDeadline(time.Time{})
 		if err != nil {
 			client.Close()
-			delete(h.extensionClients, client)
+			stale = append(stale, client)
 		}
 	}
+
+	if len(stale) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, client := range stale {
+		delete(h.extensionClients, client)
+	}
+	h.mu.Unlock()
 }
 
 func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 	h.mu.Lock()
 	resultChan := make(chan *CommandResult, 1)
 	h.mcpClients[conn] = resultChan
+	h.cmdsByConn[conn] = make(map[string]struct{})
 	h.mu.Unlock()
 
 	defer func() {
 		h.mu.Lock()
+		if cmdSet, ok := h.cmdsByConn[conn]; ok {
+			for cmdID := range cmdSet {
+				delete(h.pendingCmdOwner, cmdID)
+				delete(h.commandMeta, cmdID)
+			}
+			delete(h.cmdsByConn, conn)
+		}
 		delete(h.mcpClients, conn)
 		close(resultChan)
 		h.mu.Unlock()
@@ -105,16 +150,27 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 
 	go func() {
 		for result := range resultChan {
+			var resultPayload interface{}
+			if result.Result != "" {
+				if err := json.Unmarshal([]byte(result.Result), &resultPayload); err != nil {
+					resultPayload = result.Result
+				}
+			}
 			msg := map[string]interface{}{
 				"type":   "result",
 				"cmd_id": result.cmdID,
 				"status": result.Status,
-				"result": result.Result,
+				"result": resultPayload,
 				"error":  result.Error,
 			}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
+				debugLog("MCP write failed for cmdID=%s: %v", result.cmdID, err)
+				_ = conn.Close()
 				return
 			}
+			_ = conn.SetWriteDeadline(time.Time{})
+			debugLog("MCP write succeeded for cmdID=%s", result.cmdID)
 		}
 	}()
 
@@ -137,13 +193,17 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 			tabID, _ := msg["tab_id"].(string)
 			cmdType, _ := msg["cmd_type"].(string)
 			params, _ := msg["params"].(string)
+			if cmdID == "" {
+				continue
+			}
+			now := time.Now()
 
 			cmd := &chromedb.Command{
 				ID:        cmdID,
 				TabID:     tabID,
 				Type:      cmdType,
 				Params:    params,
-				CreatedAt: time.Now(),
+				CreatedAt: now,
 			}
 			db.AddCommand(cmd)
 
@@ -155,8 +215,21 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 			paramsObj["_type"] = cmdType
 			paramsObj["_cmd_id"] = cmdID
 
+			h.mu.Lock()
+			h.pendingCmdOwner[cmdID] = conn
+			if _, ok := h.cmdsByConn[conn]; !ok {
+				h.cmdsByConn[conn] = make(map[string]struct{})
+			}
+			h.cmdsByConn[conn][cmdID] = struct{}{}
+			h.commandMeta[cmdID] = CommandMeta{
+				CmdType:   cmdType,
+				TabID:     tabID,
+				StartedAt: now,
+			}
+			h.mu.Unlock()
+
 			h.sendToTab(tabID, cmdID, "command", paramsObj)
-			debugLog("Forwarded command %s to extension for tab %s", cmdID, tabID)
+			debugLog("Forwarded command %s (%s) to extension for tab %s", cmdID, cmdType, tabID)
 
 		case "command_complete", "command_failed":
 			cmdID, _ := msg["cmd_id"].(string)
@@ -170,6 +243,7 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 			}
 			result, _ := msg["result"]
 			resultStr, _ := json.Marshal(result)
+			debugLog("Received command result for cmdID=%s, broadcasting to waiting clients", cmdID)
 			h.BroadcastResult(&CommandResult{
 				cmdID:  cmdID,
 				Status: status,
@@ -181,16 +255,92 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 }
 
 func (h *WSHub) BroadcastResult(result *CommandResult) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	cleanupSeenResults()
+	if isResultSeen(result.cmdID) {
+		debugLog("BroadcastResult: skipping duplicate result for cmdID=%s", result.cmdID)
+		return
+	}
+
+	h.mu.Lock()
+	ownerConn, hasOwner := h.pendingCmdOwner[result.cmdID]
+	if hasOwner {
+		ch, ok := h.mcpClients[ownerConn]
+		delete(h.pendingCmdOwner, result.cmdID)
+		if cmdSet, hasSet := h.cmdsByConn[ownerConn]; hasSet {
+			delete(cmdSet, result.cmdID)
+		}
+		if ok {
+			select {
+			case ch <- result:
+				debugLog("Delivered result cmdID=%s to owner MCP client", result.cmdID)
+				h.mu.Unlock()
+				return
+			default:
+				ownerConn.Close()
+				delete(h.mcpClients, ownerConn)
+				if chSet, exists := h.cmdsByConn[ownerConn]; exists {
+					for cmdID := range chSet {
+						delete(h.pendingCmdOwner, cmdID)
+						delete(h.commandMeta, cmdID)
+					}
+					delete(h.cmdsByConn, ownerConn)
+				}
+				h.mu.Unlock()
+				debugLog("Dropped result for cmdID=%s due backpressure on owner MCP socket", result.cmdID)
+				return
+			}
+		}
+		debugLog("Owner MCP client missing for cmdID=%s during delivery", result.cmdID)
+	}
+
+	type mcpTarget struct {
+		conn *websocket.Conn
+		ch   chan *CommandResult
+	}
+	targets := make([]mcpTarget, 0, len(h.mcpClients))
 	for conn, ch := range h.mcpClients {
+		targets = append(targets, mcpTarget{conn: conn, ch: ch})
+	}
+	if !hasOwner {
+		debugLog("No owner for cmdID=%s, falling back to broadcast across %d MCP clients", result.cmdID, len(targets))
+	}
+	h.mu.Unlock()
+
+	var stale []mcpTarget
+	for _, target := range targets {
 		select {
-		case ch <- result:
+		case target.ch <- result:
 		default:
-			conn.Close()
-			delete(h.mcpClients, conn)
+			target.conn.Close()
+			stale = append(stale, target)
 		}
 	}
+
+	if len(stale) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, target := range stale {
+		if cmdSet, ok := h.cmdsByConn[target.conn]; ok {
+			for cmdID := range cmdSet {
+				delete(h.pendingCmdOwner, cmdID)
+				delete(h.commandMeta, cmdID)
+			}
+			delete(h.cmdsByConn, target.conn)
+		}
+		delete(h.mcpClients, target.conn)
+	}
+	h.mu.Unlock()
+}
+
+func (h *WSHub) popCommandMeta(cmdID string) (CommandMeta, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	meta, ok := h.commandMeta[cmdID]
+	if ok {
+		delete(h.commandMeta, cmdID)
+	}
+	return meta, ok
 }
 
 func debugLog(format string, args ...interface{}) {
@@ -204,11 +354,63 @@ func escapeJSON(s string) string {
 	return string(b)
 }
 
+func commandResultFromDB(db *chromedb.SharedDB, cmdID string) (*CommandResult, bool) {
+	cmd, err := db.GetCommand(cmdID)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			debugLog("DB poll read failed for cmdID=%s: %v", cmdID, err)
+		}
+		return nil, false
+	}
+	switch cmd.Status {
+	case "completed":
+		return &CommandResult{
+			cmdID:  cmdID,
+			Status: "completed",
+			Result: cmd.Result,
+		}, true
+	case "failed":
+		return &CommandResult{
+			cmdID:  cmdID,
+			Status: "failed",
+			Error:  cmd.Result,
+		}, true
+	default:
+		return nil, false
+	}
+}
+
 var wsHub *WSHub
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+var (
+	seenResults   = make(map[string]time.Time)
+	seenResultsMu sync.Mutex
+)
+
+func cleanupSeenResults() {
+	seenResultsMu.Lock()
+	defer seenResultsMu.Unlock()
+	cutoff := time.Now().Add(-30 * time.Second)
+	for id, t := range seenResults {
+		if t.Before(cutoff) {
+			delete(seenResults, id)
+		}
+	}
+}
+
+func isResultSeen(id string) bool {
+	seenResultsMu.Lock()
+	defer seenResultsMu.Unlock()
+	_, exists := seenResults[id]
+	if !exists {
+		seenResults[id] = time.Now()
+	}
+	return exists
 }
 
 func getPIDFile() string {
@@ -592,27 +794,39 @@ func handleExtensionWebSocket(hub *WSHub, db *chromedb.SharedDB, debug bool) htt
 				cmdID, _ := msg["cmd_id"].(string)
 				result, _ := msg["result"]
 				resultStr, _ := json.Marshal(result)
-				db.CompleteCommand(cmdID, string(resultStr))
 				hub.BroadcastResult(&CommandResult{
 					cmdID:  cmdID,
 					Status: "completed",
 					Result: string(resultStr),
 				})
+				if err := db.CompleteCommand(cmdID, string(resultStr)); err != nil && debug {
+					debugLog("Failed to persist command completion %s: %v", cmdID, err)
+				}
 				if debug {
-					debugLog("Command completed: %s", cmdID)
+					if meta, ok := hub.popCommandMeta(cmdID); ok {
+						debugLog("Command completed: %s (%s) tab=%s duration_ms=%d", cmdID, meta.CmdType, meta.TabID, time.Since(meta.StartedAt).Milliseconds())
+					} else {
+						debugLog("Command completed: %s", cmdID)
+					}
 				}
 
 			case "command_failed":
 				cmdID, _ := msg["cmd_id"].(string)
 				errMsg, _ := msg["error"].(string)
-				db.FailCommand(cmdID, errMsg)
 				hub.BroadcastResult(&CommandResult{
 					cmdID:  cmdID,
 					Status: "failed",
 					Error:  errMsg,
 				})
+				if err := db.FailCommand(cmdID, errMsg); err != nil && debug {
+					debugLog("Failed to persist command failure %s: %v", cmdID, err)
+				}
 				if debug {
-					debugLog("Command failed: %s - %s", cmdID, errMsg)
+					if meta, ok := hub.popCommandMeta(cmdID); ok {
+						debugLog("Command failed: %s (%s) tab=%s duration_ms=%d - %s", cmdID, meta.CmdType, meta.TabID, time.Since(meta.StartedAt).Milliseconds(), errMsg)
+					} else {
+						debugLog("Command failed: %s - %s", cmdID, errMsg)
+					}
 				}
 			}
 		}
@@ -700,15 +914,18 @@ func runMCPServer(debug bool) {
 			mcp.WithDescription("Execute JavaScript in a connected tab. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("script", mcp.Required(), mcp.Description("JavaScript code to execute")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(30000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(10000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
 			if tabID == "" {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
-			script, _ := request.RequireString("script")
-			timeout := request.GetInt("timeout_ms", 30000)
+			script := request.GetString("script", "")
+			if script == "" {
+				return mcp.NewToolResultError("script is required for execute_script"), nil
+			}
+			timeout := request.GetInt("timeout_ms", 10000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
 			return executeViaWebSocket(cmdID, tabID, "execute_script", script, timeout, debug)
 		},
@@ -720,7 +937,7 @@ func runMCPServer(debug bool) {
 			mcp.WithDescription("Get structured DOM overview of the page. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithNumber("max_depth", mcp.DefaultNumber(3), mcp.Description("Maximum depth to traverse")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
@@ -728,7 +945,7 @@ func runMCPServer(debug bool) {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
 			maxDepth := request.GetInt("max_depth", 3)
-			timeout := request.GetInt("timeout_ms", 15000)
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
 			params := fmt.Sprintf(`{"max_depth":%d}`, maxDepth)
 			return executeViaWebSocket(cmdID, tabID, "get_page_structure", params, timeout, debug)
@@ -741,7 +958,9 @@ func runMCPServer(debug bool) {
 			mcp.WithDescription("Extract readable text, links, forms, images from page. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.DefaultString(""), mcp.Description("Optional CSS selector")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Offset for pagination")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(500), mcp.Description("Limit text characters returned")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
@@ -749,9 +968,11 @@ func runMCPServer(debug bool) {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
 			selector := request.GetString("selector", "")
-			timeout := request.GetInt("timeout_ms", 15000)
+			offset := request.GetInt("offset", 0)
+			limit := request.GetInt("limit", 500)
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			params := fmt.Sprintf(`{"selector":"%s"}`, selector)
+			params := fmt.Sprintf(`{"selector":"%s","offset":%d,"limit":%d}`, selector, offset, limit)
 			return executeViaWebSocket(cmdID, tabID, "extract_page_content", params, timeout, debug)
 		},
 	)
@@ -761,18 +982,20 @@ func runMCPServer(debug bool) {
 			"get_page_source",
 			mcp.WithDescription("Get raw HTML source. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
-			mcp.WithNumber("max_length", mcp.DefaultNumber(50000), mcp.Description("Max characters")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Start position")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(500), mcp.Description("Max characters to return")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
 			if tabID == "" {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
-			maxLength := request.GetInt("max_length", 50000)
-			timeout := request.GetInt("timeout_ms", 15000)
+			offset := request.GetInt("offset", 0)
+			limit := request.GetInt("limit", 500)
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			params := fmt.Sprintf(`{"max_length":%d}`, maxLength)
+			params := fmt.Sprintf(`{"offset":%d,"limit":%d}`, offset, limit)
 			return executeViaWebSocket(cmdID, tabID, "get_page_source", params, timeout, debug)
 		},
 	)
@@ -784,19 +1007,77 @@ func runMCPServer(debug bool) {
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS or XPath selector")),
 			mcp.WithString("selector_type", mcp.DefaultString("css"), mcp.Description("'css' or 'xpath'")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Offset for pagination")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("Maximum elements to return (max 50)")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
 			if tabID == "" {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
-			selector, _ := request.RequireString("selector")
+			selector := request.GetString("selector", "")
+			if selector == "" {
+				return mcp.NewToolResultError("selector is required for find_elements"), nil
+			}
 			selectorType := request.GetString("selector_type", "css")
-			timeout := request.GetInt("timeout_ms", 15000)
+			offset := request.GetInt("offset", 0)
+			limit := request.GetInt("limit", 20)
+			if limit > 50 {
+				limit = 50
+			}
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			params := fmt.Sprintf(`{"selector":"%s","selector_type":"%s"}`, selector, selectorType)
+			paramsObj := map[string]interface{}{
+				"selector":      selector,
+				"selector_type": selectorType,
+				"offset":        offset,
+				"limit":         limit,
+			}
+			paramsBytes, _ := json.Marshal(paramsObj)
+			params := string(paramsBytes)
 			return executeViaWebSocket(cmdID, tabID, "find_elements", params, timeout, debug)
+		},
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool(
+			"get_visible_elements",
+			mcp.WithDescription("Get all visible elements with text content. Great for extracting page content quickly."),
+			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
+			mcp.WithNumber("max_elements", mcp.DefaultNumber(20), mcp.Description("Maximum elements to return (max 100)")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Offset for pagination")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("Maximum elements to return")),
+			mcp.WithNumber("min_text_length", mcp.DefaultNumber(1), mcp.Description("Minimum text length")),
+			mcp.WithString("include_headings", mcp.DefaultString("true"), mcp.Description("Include headings: 'true' or 'false'")),
+			mcp.WithString("include_links", mcp.DefaultString("true"), mcp.Description("Include links: 'true' or 'false'")),
+			mcp.WithString("include_buttons", mcp.DefaultString("true"), mcp.Description("Include buttons: 'true' or 'false'")),
+			mcp.WithString("include_inputs", mcp.DefaultString("true"), mcp.Description("Include inputs: 'true' or 'false'")),
+			mcp.WithString("include_images", mcp.DefaultString("true"), mcp.Description("Include images: 'true' or 'false'")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			tabID := getTabID(request)
+			if tabID == "" {
+				return mcp.NewToolResultError("tab_id is required"), nil
+			}
+			limit := request.GetInt("max_elements", 20)
+			limit = request.GetInt("limit", limit)
+			if limit > 100 {
+				limit = 100
+			}
+			offset := request.GetInt("offset", 0)
+			minTextLength := request.GetInt("min_text_length", 1)
+			includeHeadings := request.GetString("include_headings", "true") == "true"
+			includeLinks := request.GetString("include_links", "true") == "true"
+			includeButtons := request.GetString("include_buttons", "true") == "true"
+			includeInputs := request.GetString("include_inputs", "true") == "true"
+			includeImages := request.GetString("include_images", "true") == "true"
+			timeout := request.GetInt("timeout_ms", 8000)
+			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
+			params := fmt.Sprintf(`{"offset":%d,"limit":%d,"max_elements":%d,"min_text_length":%d,"include_headings":%v,"include_links":%v,"include_buttons":%v,"include_inputs":%v,"include_images":%v}`,
+				offset, limit, limit, minTextLength, includeHeadings, includeLinks, includeButtons, includeInputs, includeImages)
+			return executeViaWebSocket(cmdID, tabID, "get_visible_elements", params, timeout, debug)
 		},
 	)
 
@@ -806,17 +1087,24 @@ func runMCPServer(debug bool) {
 			mcp.WithDescription("Get detailed element info. If you don't know tab IDs, call list_connected_tabs first."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
 			if tabID == "" {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
-			selector, _ := request.RequireString("selector")
-			timeout := request.GetInt("timeout_ms", 15000)
+			selector := request.GetString("selector", "")
+			if selector == "" {
+				return mcp.NewToolResultError("selector is required for get_element_details"), nil
+			}
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			params := fmt.Sprintf(`{"selector":"%s"}`, selector)
+			paramsObj := map[string]interface{}{
+				"selector": selector,
+			}
+			paramsBytes, _ := json.Marshal(paramsObj)
+			params := string(paramsBytes)
 			return executeViaWebSocket(cmdID, tabID, "get_element_details", params, timeout, debug)
 		},
 	)
@@ -837,40 +1125,35 @@ func runMCPServer(debug bool) {
 			selector, _ := request.RequireString("selector")
 			timeout := request.GetInt("timeout_ms", 10000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			params := fmt.Sprintf(`{"selector":"%s","timeout_ms":%d}`, selector, timeout)
+			paramsObj := map[string]interface{}{
+				"selector":   selector,
+				"timeout_ms": timeout,
+			}
+			paramsBytes, _ := json.Marshal(paramsObj)
+			params := string(paramsBytes)
 			return executeViaWebSocket(cmdID, tabID, "wait_for_element", params, timeout+5000, debug)
 		},
 	)
 
 	mcpServer.AddTool(
 		mcp.NewTool(
-			"take_screenshot",
-			mcp.WithDescription("Capture page screenshot. If you don't know tab IDs, call list_connected_tabs first."),
-			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
-		),
-		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			tabID := getTabID(request)
-			if tabID == "" {
-				return mcp.NewToolResultError("tab_id is required"), nil
-			}
-			timeout := request.GetInt("timeout_ms", 15000)
-			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
-			return executeViaWebSocket(cmdID, tabID, "take_screenshot", "{}", timeout, debug)
-		},
-	)
-
-	mcpServer.AddTool(
-		mcp.NewTool(
 			"search_text",
-			mcp.WithDescription("Search for text within the page like grep. Returns matches with context snippets."),
+			mcp.WithDescription("Search for text within visible page elements like grep. Returns matches with context snippets."),
 			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
 			mcp.WithString("pattern", mcp.Required(), mcp.Description("Text or pattern to search for")),
+			mcp.WithString("text", mcp.Description("Alias for pattern")),
+			mcp.WithString("query", mcp.Description("Alias for pattern")),
+			mcp.WithString("search_term", mcp.Description("Alias for pattern")),
+			mcp.WithString("search_query", mcp.Description("Alias for pattern")),
+			mcp.WithString("search_string", mcp.Description("Alias for pattern")),
+			mcp.WithString("match", mcp.Description("Alias for pattern")),
 			mcp.WithString("case_sensitive", mcp.DefaultString("false"), mcp.Description("Case sensitive search: 'true' or 'false'")),
 			mcp.WithString("whole_word", mcp.DefaultString("false"), mcp.Description("Match whole words only: 'true' or 'false'")),
 			mcp.WithString("regex", mcp.DefaultString("false"), mcp.Description("Treat pattern as regex: 'true' or 'false'")),
-			mcp.WithNumber("max_results", mcp.DefaultNumber(100), mcp.Description("Maximum number of results")),
-			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+			mcp.WithNumber("max_results", mcp.DefaultNumber(20), mcp.Description("Maximum number of results to collect")),
+			mcp.WithNumber("offset", mcp.DefaultNumber(0), mcp.Description("Offset for pagination")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("Limit results returned")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
@@ -879,17 +1162,77 @@ func runMCPServer(debug bool) {
 			}
 			pattern := request.GetString("pattern", "")
 			if pattern == "" {
+				pattern = request.GetString("text", "")
+			}
+			if pattern == "" {
+				pattern = request.GetString("query", "")
+			}
+			if pattern == "" {
+				pattern = request.GetString("search_term", "")
+			}
+			if pattern == "" {
+				pattern = request.GetString("search_query", "")
+			}
+			if pattern == "" {
+				pattern = request.GetString("search_string", "")
+			}
+			if pattern == "" {
+				pattern = request.GetString("match", "")
+			}
+			if pattern == "" {
 				return mcp.NewToolResultError("pattern is required"), nil
 			}
 			caseSens := request.GetString("case_sensitive", "false") == "true"
 			wholeWord := request.GetString("whole_word", "false") == "true"
 			isRegex := request.GetString("regex", "false") == "true"
-			maxResults := request.GetInt("max_results", 100)
-			params := fmt.Sprintf(`{"pattern":"%s","case_sensitive":%v,"whole_word":%v,"regex":%v,"max_results":%v}`,
-				escapeJSON(pattern), caseSens, wholeWord, isRegex, maxResults)
-			timeout := request.GetInt("timeout_ms", 15000)
+			maxResults := request.GetInt("max_results", 20)
+			offset := request.GetInt("offset", 0)
+			limit := request.GetInt("limit", 20)
+			paramsObj := map[string]interface{}{
+				"pattern":        pattern,
+				"case_sensitive": caseSens,
+				"whole_word":     wholeWord,
+				"regex":          isRegex,
+				"max_results":    maxResults,
+				"offset":         offset,
+				"limit":          limit,
+			}
+			paramsBytes, _ := json.Marshal(paramsObj)
+			params := string(paramsBytes)
+			timeout := request.GetInt("timeout_ms", 8000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
 			return executeViaWebSocket(cmdID, tabID, "search_text", params, timeout, debug)
+		},
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool(
+			"click_element",
+			mcp.WithDescription("Click an element on the page using CSS selector."),
+			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
+			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),
+			mcp.WithNumber("index", mcp.DefaultNumber(0), mcp.Description("Index if multiple elements match (default 0)")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(8000), mcp.Description("Timeout in milliseconds")),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			tabID := getTabID(request)
+			if tabID == "" {
+				return mcp.NewToolResultError("tab_id is required"), nil
+			}
+			selector := request.GetString("selector", "")
+			if selector == "" {
+				return mcp.NewToolResultError("selector is required"), nil
+			}
+			index := request.GetInt("index", 0)
+			timeout := request.GetInt("timeout_ms", 8000)
+			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
+			paramsObj := map[string]interface{}{
+				"selector": selector,
+				"index":    index,
+			}
+			paramsBytes, _ := json.Marshal(paramsObj)
+			params := string(paramsBytes)
+			return executeViaWebSocket(cmdID, tabID, "click_element", params, timeout, debug)
 		},
 	)
 
@@ -913,6 +1256,15 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 
 	resultChan := make(chan *CommandResult, 1)
 	done := make(chan struct{})
+	pollTicker := time.NewTicker(100 * time.Millisecond)
+	defer pollTicker.Stop()
+
+	pollDB, err := chromedb.NewSharedDB(getDBPath())
+	if err != nil {
+		debugLog("DB poll unavailable for cmdID=%s: %v", cmdID, err)
+	} else {
+		defer pollDB.Close()
+	}
 
 	go func() {
 		for {
@@ -932,15 +1284,42 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 
 			if msgType == "result" || msgType == "completed" || msgType == "command_complete" || msgType == "command_failed" {
 				resultCmdID, _ := msg["cmd_id"].(string)
-				status, _ := msg["status"].(string)
-				result, _ := msg["result"]
-				errMsg, _ := msg["error"].(string)
-				resultStr, _ := json.Marshal(result)
+
+				if resultCmdID != cmdID {
+					debugLog("Ignoring result for cmdID=%s (waiting for %s)", resultCmdID, cmdID)
+					continue
+				}
+
+				var status string
+				var resultBytes []byte
+				var errMsg string
+				if msgType == "command_failed" {
+					status = "failed"
+					errMsg, _ = msg["error"].(string)
+				} else {
+					status = "completed"
+					if msgType == "result" {
+						if wsStatus, ok := msg["status"].(string); ok && wsStatus != "" {
+							status = wsStatus
+						}
+						if status == "failed" {
+							errMsg, _ = msg["error"].(string)
+						}
+					}
+					var result interface{}
+					result, _ = msg["result"]
+					switch v := result.(type) {
+					case string:
+						resultBytes = []byte(v)
+					default:
+						resultBytes, _ = json.Marshal(result)
+					}
+				}
 
 				cmdResult := &CommandResult{
 					cmdID:  resultCmdID,
 					Status: status,
-					Result: string(resultStr),
+					Result: string(resultBytes),
 					Error:  errMsg,
 				}
 
@@ -966,31 +1345,53 @@ func executeViaWebSocket(cmdID, tabID, cmdType, params string, timeoutMs int, de
 
 	debugLog("%s: %s (tab=%s) -> sent command, waiting for result", cmdType, cmdID, tabID)
 
-	select {
-	case result := <-resultChan:
-		debugLog("MCP WS got result: status=%s, cmdID=%s", result.Status, result.cmdID)
-		if result.Status == "completed" || result.Status == "success" {
-			return mcp.NewToolResultText(result.Result), nil
+	timeoutTimer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timeoutTimer.Stop()
+	doneCh := done
+
+	for {
+		select {
+		case result := <-resultChan:
+			debugLog("MCP WS got result: status=%s, cmdID=%s", result.Status, result.cmdID)
+			if result.Status == "completed" || result.Status == "success" {
+				return mcp.NewToolResultText(result.Result), nil
+			}
+			return mcp.NewToolResultError(result.Error), nil
+		case <-doneCh:
+			if pollDB == nil {
+				return mcp.NewToolResultError("connection closed"), nil
+			}
+			debugLog("MCP WS closed for cmdID=%s, continuing with DB poll fallback", cmdID)
+			doneCh = nil
+		case <-pollTicker.C:
+			if pollDB != nil {
+				if dbResult, ok := commandResultFromDB(pollDB, cmdID); ok {
+					debugLog("Resolved result via DB poll: cmdID=%s status=%s", cmdID, dbResult.Status)
+					if dbResult.Status == "completed" || dbResult.Status == "success" {
+						return mcp.NewToolResultText(dbResult.Result), nil
+					}
+					return mcp.NewToolResultError(dbResult.Error), nil
+				}
+			}
+		case <-timeoutTimer.C:
+			return mcp.NewToolResultError(fmt.Sprintf("timeout after %dms waiting for result", timeoutMs)), nil
 		}
-		return mcp.NewToolResultError(result.Error), nil
-	case <-done:
-		return mcp.NewToolResultError("connection closed"), nil
-	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-		return mcp.NewToolResultError("timeout waiting for result"), nil
 	}
 }
 
 func getTabsFromDaemon(debug bool) ([]map[string]interface{}, error) {
 	daemonURL := getDaemonURL()
-	resp, err := http.Get(daemonURL + "/tabs")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(daemonURL + "/tabs")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("daemon connection failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid response: %v", err)
 	}
 
 	if result["type"] != "success" {
@@ -999,7 +1400,7 @@ func getTabsFromDaemon(debug bool) ([]map[string]interface{}, error) {
 
 	resultList, ok := result["result"].([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("invalid response")
+		return nil, fmt.Errorf("invalid response format")
 	}
 
 	tabs := make([]map[string]interface{}, 0, len(resultList))

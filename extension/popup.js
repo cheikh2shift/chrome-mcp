@@ -39,7 +39,10 @@ async function testConnection() {
 async function loadCurrentTabs() {
   try {
     const tabs = await chrome.tabs.query({ currentWindow: true });
-    currentTabs = tabs.filter(t => !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://'));
+    currentTabs = tabs.filter((t) => {
+      const url = t.url || '';
+      return !/^(chrome|chrome-extension|devtools|edge|about):\/\//i.test(url);
+    });
     renderTabsList();
   } catch (error) {
     console.error('Error loading tabs:', error);

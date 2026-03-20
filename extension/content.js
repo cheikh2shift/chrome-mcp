@@ -12,16 +12,13 @@
             return getPageStructure(message.max_depth);
 
           case 'extract_content':
-            return extractContent(message.selector);
+            return extractContent(message.selector, message.options || {});
 
           case 'get_page_source':
-            return getPageSource(message.max_length);
+            return getPageSource(message.offset || 0, message.limit || 500);
 
           case 'find_elements':
-            return findElements(message.selector, message.selector_type);
-
-          case 'execute_script':
-            return executeScript(message.script, message.await_promise);
+            return findElements(message.selector, message.selector_type, message.offset, message.limit);
 
           case 'get_element_details':
             return getElementDetails(message.selector);
@@ -37,6 +34,9 @@
 
           case 'search_text':
             return searchText(message.pattern, message.options);
+
+          case 'get_visible_elements':
+            return getVisibleElements(message.options);
 
           default:
             return { error: `Unknown message type: ${message.type}` };
@@ -96,7 +96,17 @@
     return getElementInfo(document.body, 0);
   }
 
-  function extractContent(selector) {
+  function extractContent(selector, options = {}) {
+    const {
+      offset = 0,
+      limit = 500,
+      headingsLimit = 20,
+      linksLimit = 50,
+      formsLimit = 10,
+      buttonsLimit = 30,
+      imagesLimit = 20
+    } = options;
+
     function getText(element) {
       const text = [];
       function walk(node) {
@@ -123,53 +133,117 @@
       return { error: `Element not found: ${selector}` };
     }
 
+    const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6')).map(h => ({
+      level: parseInt(h.tagName[1]),
+      text: h.innerText.trim().substring(0, 200)
+    }));
+
+    const allLinks = Array.from(root.querySelectorAll('a[href]')).map(a => ({
+      text: a.innerText.trim().substring(0, 100),
+      href: a.href
+    }));
+
+    const allForms = Array.from(document.querySelectorAll('form')).map(f => ({
+      action: f.action,
+      method: f.method.toUpperCase(),
+      inputs: Array.from(f.querySelectorAll('input, textarea, select')).slice(0, 30).map(i => ({
+        type: i.type || i.tagName.toLowerCase(),
+        name: i.name || null,
+        placeholder: i.placeholder || null,
+        required: i.required || false
+      }))
+    }));
+
+    const allButtons = Array.from(root.querySelectorAll('button')).map(b => ({
+      text: b.innerText.trim().substring(0, 100),
+      type: b.type || 'submit',
+      disabled: b.disabled
+    }));
+
+    const allImages = Array.from(root.querySelectorAll('img[src]')).map(img => ({
+      alt: img.alt || '',
+      src: img.src,
+      width: img.naturalWidth,
+      height: img.naturalHeight
+    }));
+
+    const fullText = getText(root);
+    const textWindow = fullText.substring(offset, offset + limit);
+    const textTruncated = (offset + limit) < fullText.length;
+
     const result = {
       title: document.title,
       url: window.location.href,
-      text: getText(root),
-      headings: Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6')).slice(0, 20).map(h => ({
-        level: parseInt(h.tagName[1]),
-        text: h.innerText.trim().substring(0, 200)
-      })),
-      links: Array.from(root.querySelectorAll('a[href]')).slice(0, 50).map(a => ({
-        text: a.innerText.trim().substring(0, 100),
-        href: a.href
-      })),
-      forms: Array.from(root.querySelectorAll('form')).slice(0, 10).map(f => ({
-        action: f.action,
-        method: f.method.toUpperCase(),
-        inputs: Array.from(f.querySelectorAll('input, textarea, select')).slice(0, 30).map(i => ({
-          type: i.type || i.tagName.toLowerCase(),
-          name: i.name || null,
-          placeholder: i.placeholder || null,
-          required: i.required || false
-        }))
-      })),
-      buttons: Array.from(root.querySelectorAll('button')).slice(0, 30).map(b => ({
-        text: b.innerText.trim().substring(0, 100),
-        type: b.type || 'submit',
-        disabled: b.disabled
-      })),
-      images: Array.from(root.querySelectorAll('img[src]')).slice(0, 20).map(img => ({
-        alt: img.alt || '',
-        src: img.src,
-        width: img.naturalWidth,
-        height: img.naturalHeight
-      }))
+      text: textWindow,
+      textOffset: offset,
+      textLimit: limit,
+      textTotal: fullText.length,
+      textTruncated: textTruncated,
+      headings: {
+        total: allHeadings.length,
+        offset: 0,
+        limit: headingsLimit,
+        items: allHeadings.slice(0, headingsLimit)
+      },
+      links: {
+        total: allLinks.length,
+        offset: 0,
+        limit: linksLimit,
+        items: allLinks.slice(0, linksLimit)
+      },
+      forms: {
+        total: allForms.length,
+        offset: 0,
+        limit: formsLimit,
+        items: allForms.slice(0, formsLimit)
+      },
+      buttons: {
+        total: allButtons.length,
+        offset: 0,
+        limit: buttonsLimit,
+        items: allButtons.slice(0, buttonsLimit)
+      },
+      images: {
+        total: allImages.length,
+        offset: 0,
+        limit: imagesLimit,
+        items: allImages.slice(0, imagesLimit)
+      }
     };
 
     return result;
   }
 
-  function getPageSource(maxLength = 50000) {
+  function getPageSource(offset = 0, limit = 50000) {
     let html = document.documentElement.outerHTML;
-    if (html.length > maxLength) {
-      html = html.substring(0, maxLength) + '\n\n[Truncated - page too large]';
+    const totalLength = html.length;
+    if (offset >= totalLength) {
+      return {
+        html: '',
+        offset: offset,
+        limit: limit,
+        total: totalLength,
+        truncated: false
+      };
     }
-    return html;
+    let result = html.substring(offset, offset + limit);
+    const truncated = (offset + limit) < totalLength;
+    if (truncated) {
+      result += '\n\n[Truncated - use offset=' + (offset + limit) + ' to continue]';
+    }
+    return {
+      html: result,
+      offset: offset,
+      limit: limit,
+      total: totalLength,
+      truncated: truncated
+    };
   }
 
-  function findElements(selector, selectorType = 'css') {
+  function findElements(selector, selectorType = 'css', offset = 0, limit = 20) {
+    if (!selector || selector.trim() === '') {
+      return { error: 'Selector is required' };
+    }
     let elements;
 
     if (selectorType === 'xpath') {
@@ -182,11 +256,15 @@
       elements = Array.from(document.querySelectorAll(selector));
     }
 
+    const total = elements.length;
+    const startIndex = Math.min(offset, total);
+    const endIndex = Math.min(startIndex + limit, total);
+    const slicedElements = elements.slice(startIndex, endIndex);
     const results = [];
-    const maxResults = 50;
 
-    for (let i = 0; i < Math.min(elements.length, maxResults); i++) {
-      const el = elements[i];
+    for (let i = 0; i < slicedElements.length; i++) {
+      const el = slicedElements[i];
+      const globalIndex = startIndex + i;
       const attrs = {};
 
       if (el.type) attrs.type = el.type;
@@ -202,7 +280,7 @@
       const rect = el.getBoundingClientRect();
 
       results.push({
-        index: i,
+        index: globalIndex,
         tag: el.tagName.toLowerCase(),
         id: el.id || null,
         class: el.className || null,
@@ -220,60 +298,12 @@
     }
 
     return {
-      count: elements.length,
+      total: total,
+      offset: offset,
+      limit: limit,
+      count: results.length,
       elements: results
     };
-  }
-
-  async function executeScript(script, awaitPromise = true) {
-    try {
-      const wrappedScript = `
-        (function() {
-          ${script}
-        })();
-      `;
-
-      let result;
-      if (awaitPromise) {
-        const asyncScript = `
-          (async function() {
-            ${script}
-          })();
-        `;
-        result = await eval(asyncScript);
-      } else {
-        result = eval(wrappedScript);
-      }
-
-      if (result instanceof Element || result instanceof HTMLElement) {
-        return serializeElement(result);
-      }
-
-      if (result instanceof NodeList || result instanceof HTMLCollection || Array.isArray(result)) {
-        return Array.from(result).map(el => {
-          if (el instanceof Element) {
-            return serializeElement(el);
-          }
-          return el;
-        });
-      }
-
-      if (typeof result === 'object' && result !== null) {
-        try {
-          return JSON.parse(JSON.stringify(result, (key, value) => {
-            if (typeof value === 'function') return value.toString();
-            if (value instanceof Element) return serializeElement(value);
-            return value;
-          }));
-        } catch {
-          return String(result);
-        }
-      }
-
-      return result;
-    } catch (error) {
-      return { error: error.message, stack: error.stack };
-    }
   }
 
   function serializeElement(el) {
@@ -299,6 +329,9 @@
   }
 
   function getElementDetails(selector) {
+    if (!selector || selector.trim() === '') {
+      return { error: 'Selector is required' };
+    }
     const el = document.querySelector(selector);
 
     if (!el) {
@@ -405,7 +438,9 @@
       caseSensitive = false,
       wholeWord = false,
       regex = false,
-      maxResults = 100
+      maxResults = 20,
+      offset = 0,
+      limit = 20
     } = options;
 
     let searchPattern;
@@ -423,7 +458,22 @@
       searchPattern = new RegExp(escaped, caseSensitive ? 'g' : 'gi');
     }
 
-    const results = [];
+    function isVisible(el) {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        style.opacity !== '0'
+      );
+    }
+
+    const safeMaxResults = Math.max(1, Math.min(200, maxResults));
+    const snippetPad = 30;
+    const nodeScanLimit = Math.max(1000, safeMaxResults * 200);
+    const allResults = [];
     const treeWalker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_TEXT,
@@ -434,6 +484,9 @@
             if (['script', 'style', 'noscript', 'iframe', 'textarea'].includes(tag)) {
               return NodeFilter.FILTER_REJECT;
             }
+            if (!isVisible(node.parentElement)) {
+              return NodeFilter.FILTER_REJECT;
+            }
           }
           return NodeFilter.FILTER_ACCEPT;
         }
@@ -441,33 +494,272 @@
     );
 
     let node;
-    let matchIndex = 0;
-    while ((node = treeWalker.nextNode()) && results.length < maxResults) {
+    let totalMatches = 0;
+    let nodesVisited = 0;
+    let truncated = false;
+    while ((node = treeWalker.nextNode())) {
+      nodesVisited++;
+      if (nodesVisited >= nodeScanLimit) {
+        truncated = true;
+        break;
+      }
       const text = node.textContent || '';
       let match;
       searchPattern.lastIndex = 0;
-      while ((match = searchPattern.exec(text)) !== null && results.length < maxResults) {
-        const start = Math.max(0, match.index - 30);
-        const end = Math.min(text.length, match.index + match[0].length + 30);
-        const snippet = text.substring(start, end);
-        
-        results.push({
-          index: matchIndex++,
-          text: snippet,
-          match: match[0],
-          position: match.index,
-          parentTag: node.parentElement?.tagName.toLowerCase() || 'unknown',
-          parentId: node.parentElement?.id || null,
-          parentClass: node.parentElement?.className || null
-        });
+      while ((match = searchPattern.exec(text)) !== null) {
+        totalMatches++;
+        if (allResults.length < safeMaxResults) {
+          const snippetStart = Math.max(0, match.index - snippetPad);
+          const snippetEnd = Math.min(text.length, match.index + match[0].length + snippetPad);
+          const snippet = text.substring(snippetStart, snippetEnd);
+          allResults.push({
+            index: allResults.length,
+            snippet,
+            match: match[0],
+            position: match.index,
+            parentTag: node.parentElement?.tagName.toLowerCase() || 'unknown',
+            parentId: node.parentElement?.id || null
+          });
+        }
+      }
+      if (allResults.length >= safeMaxResults && totalMatches >= safeMaxResults) {
+        break;
       }
     }
 
+    const paginatedResults = allResults.slice(offset, offset + limit);
+
     return {
-      count: results.length,
-      totalMatches: matchIndex,
+      count: paginatedResults.length,
+      totalMatches: totalMatches,
+      offset: offset,
+      limit: limit,
       pattern: pattern,
-      results
+      truncated: truncated || totalMatches > paginatedResults.length,
+      results: paginatedResults
     };
+  }
+
+  function getVisibleElements(options = {}) {
+    const {
+      maxElements = 40,
+      offset = 0,
+      limit = maxElements,
+      minTextLength = 1,
+      includeHeadings = true,
+      includeLinks = true,
+      includeButtons = true,
+      includeInputs = true,
+      includeImages = true
+    } = options;
+
+    const results = [];
+    const seen = new Set();
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || maxElements || 40));
+    const scanCap = Math.max(safeOffset + safeLimit, safeLimit);
+
+    function isVisible(el) {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        style.opacity !== '0'
+      );
+    }
+
+    function getPath(el) {
+      const path = [];
+      while (el && el.nodeType === Node.ELEMENT_NODE) {
+        let selector = el.tagName.toLowerCase();
+        if (el.id) {
+          selector += `#${el.id}`;
+        } else if (el.className && typeof el.className === 'string') {
+          const classes = el.className.trim().split(/\s+/).slice(0, 2);
+          if (classes.length > 0 && classes[0]) {
+            selector += `.${classes.join('.')}`;
+          }
+        }
+        path.unshift(selector);
+        el = el.parentElement;
+      }
+      return path.join(' > ');
+    }
+
+    if (includeHeadings) {
+      ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].forEach((tag) => {
+        if (results.length >= scanCap) return;
+        document.querySelectorAll(tag).forEach((el) => {
+          if (results.length >= scanCap) return;
+          if (isVisible(el) && !seen.has(el)) {
+            const text = el.innerText?.trim();
+            if (text && text.length >= minTextLength) {
+              seen.add(el);
+              results.push({
+                type: 'heading',
+                level: parseInt(tag[1]),
+                text: text.substring(0, 500),
+                selector: tag,
+                path: getPath(el),
+                rect: boundingRect(el)
+              });
+            }
+          }
+        });
+      });
+    }
+
+    if (includeLinks) {
+      document.querySelectorAll('a[href]').forEach((el) => {
+        if (results.length >= scanCap) return;
+        if (isVisible(el) && !seen.has(el)) {
+          const text = el.innerText?.trim();
+          if (text && text.length >= minTextLength) {
+            seen.add(el);
+            results.push({
+              type: 'link',
+              text: text.substring(0, 200),
+              href: el.href,
+              selector: getSelector(el),
+              path: getPath(el),
+              rect: boundingRect(el)
+            });
+          }
+        }
+      });
+    }
+
+    if (includeButtons) {
+      document.querySelectorAll('button, [role="button"]').forEach((el) => {
+        if (results.length >= scanCap) return;
+        if (isVisible(el) && !seen.has(el)) {
+          const text = el.innerText?.trim() || el.value?.trim() || el.ariaLabel?.trim();
+          if (text && text.length >= minTextLength) {
+            seen.add(el);
+            results.push({
+              type: 'button',
+              text: text.substring(0, 200),
+              disabled: el.disabled,
+              selector: getSelector(el),
+              path: getPath(el),
+              rect: boundingRect(el)
+            });
+          }
+        }
+      });
+    }
+
+    if (includeInputs) {
+      document.querySelectorAll('input, textarea, select').forEach((el) => {
+        if (results.length >= scanCap) return;
+        if (isVisible(el) && !seen.has(el)) {
+          const label = getInputLabel(el);
+          const value = el.value || '';
+          if (label || el.type !== 'hidden') {
+            seen.add(el);
+            results.push({
+              type: el.tagName.toLowerCase(),
+              inputType: el.type,
+              label: label.substring(0, 200),
+              value: value.substring(0, 100),
+              placeholder: el.placeholder || null,
+              selector: getSelector(el),
+              path: getPath(el),
+              rect: boundingRect(el)
+            });
+          }
+        }
+      });
+    }
+
+    if (includeImages) {
+      document.querySelectorAll('img').forEach((el) => {
+        if (results.length >= scanCap) return;
+        if (isVisible(el) && !seen.has(el) && el.src) {
+          seen.add(el);
+          results.push({
+            type: 'image',
+            alt: el.alt || '',
+            src: el.src,
+            selector: getSelector(el),
+            path: getPath(el),
+            rect: boundingRect(el)
+          });
+        }
+      });
+    }
+
+    const textElements = document.querySelectorAll('p, span, div, li, td, th, label, article, section');
+    textElements.forEach((el) => {
+      if (results.length >= scanCap) return;
+      if (isVisible(el) && !seen.has(el)) {
+        const text = el.innerText?.trim();
+        if (text && text.length >= minTextLength && text.length < 1000) {
+          const style = window.getComputedStyle(el);
+          const fontSize = parseFloat(style.fontSize);
+          if (fontSize >= 12) {
+            seen.add(el);
+            results.push({
+              type: 'text',
+              text: text.substring(0, 500),
+              tag: el.tagName.toLowerCase(),
+              selector: getSelector(el),
+              path: getPath(el),
+              rect: boundingRect(el)
+            });
+          }
+        }
+      }
+    });
+
+    const pagedElements = results.slice(safeOffset, safeOffset + safeLimit);
+
+    return {
+      count: pagedElements.length,
+      total: results.length,
+      offset: safeOffset,
+      limit: safeLimit,
+      truncated: results.length > (safeOffset + safeLimit),
+      elements: pagedElements,
+      url: window.location.href,
+      title: document.title
+    };
+  }
+
+  function getSelector(el) {
+    if (el.id) return `#${el.id}`;
+    let selector = el.tagName.toLowerCase();
+    if (el.className && typeof el.className === 'string') {
+      const cls = el.className.trim().split(/\s+/)[0];
+      if (cls) selector += `.${cls}`;
+    }
+    return selector;
+  }
+
+  function boundingRect(el) {
+    const rect = el.getBoundingClientRect();
+    return {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    };
+  }
+
+  function getInputLabel(el) {
+    if (el.id) {
+      const label = document.querySelector(`label[for="${el.id}"]`);
+      if (label) return label.innerText?.trim() || '';
+    }
+    const parent = el.closest('label');
+    if (parent) return parent.innerText?.trim() || '';
+    if (el.name) {
+      const label = document.querySelector(`label[for="${el.name}"]`);
+      if (label) return label.innerText?.trim() || '';
+    }
+    return el.ariaLabel || el.placeholder || '';
   }
 })();

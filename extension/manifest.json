@@ -5,6 +5,7 @@
   "description": "Control Chrome tabs via MCP server for AI agents",
   "permissions": [
     "activeTab",
+    "debugger",
     "scripting",
     "tabs"
   ],
@@ -15,6 +16,7 @@
   "background": {
     "service_worker": "background.js"
   },
+  "devtools_page": "devtools.html",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Chrome MCP Controller"
