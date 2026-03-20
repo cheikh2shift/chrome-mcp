@@ -35,6 +35,9 @@
           case 'ping':
             return { type: 'pong', loaded: true, url: window.location.href };
 
+          case 'search_text':
+            return searchText(message.pattern, message.options);
+
           default:
             return { error: `Unknown message type: ${message.type}` };
         }
@@ -395,5 +398,76 @@
         resolve(response);
       });
     });
+  }
+
+  function searchText(pattern, options = {}) {
+    const {
+      caseSensitive = false,
+      wholeWord = false,
+      regex = false,
+      maxResults = 100
+    } = options;
+
+    let searchPattern;
+    if (regex) {
+      try {
+        searchPattern = new RegExp(pattern, caseSensitive ? 'g' : 'gi');
+      } catch (e) {
+        return { error: `Invalid regex: ${e.message}` };
+      }
+    } else {
+      let escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (wholeWord) {
+        escaped = `\\b${escaped}\\b`;
+      }
+      searchPattern = new RegExp(escaped, caseSensitive ? 'g' : 'gi');
+    }
+
+    const results = [];
+    const treeWalker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (node) => {
+          if (node.parentElement) {
+            const tag = node.parentElement.tagName.toLowerCase();
+            if (['script', 'style', 'noscript', 'iframe', 'textarea'].includes(tag)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    let node;
+    let matchIndex = 0;
+    while ((node = treeWalker.nextNode()) && results.length < maxResults) {
+      const text = node.textContent || '';
+      let match;
+      searchPattern.lastIndex = 0;
+      while ((match = searchPattern.exec(text)) !== null && results.length < maxResults) {
+        const start = Math.max(0, match.index - 30);
+        const end = Math.min(text.length, match.index + match[0].length + 30);
+        const snippet = text.substring(start, end);
+        
+        results.push({
+          index: matchIndex++,
+          text: snippet,
+          match: match[0],
+          position: match.index,
+          parentTag: node.parentElement?.tagName.toLowerCase() || 'unknown',
+          parentId: node.parentElement?.id || null,
+          parentClass: node.parentElement?.className || null
+        });
+      }
+    }
+
+    return {
+      count: results.length,
+      totalMatches: matchIndex,
+      pattern: pattern,
+      results
+    };
   }
 })();

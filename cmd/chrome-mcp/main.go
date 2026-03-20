@@ -199,6 +199,11 @@ func debugLog(format string, args ...interface{}) {
 	}
 }
 
+func escapeJSON(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 var wsHub *WSHub
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -852,6 +857,39 @@ func runMCPServer(debug bool) {
 			timeout := request.GetInt("timeout_ms", 15000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
 			return executeViaWebSocket(cmdID, tabID, "take_screenshot", "{}", timeout, debug)
+		},
+	)
+
+	mcpServer.AddTool(
+		mcp.NewTool(
+			"search_text",
+			mcp.WithDescription("Search for text within the page like grep. Returns matches with context snippets."),
+			mcp.WithString("tab_id", mcp.Required(), mcp.Description("Tab ID")),
+			mcp.WithString("pattern", mcp.Required(), mcp.Description("Text or pattern to search for")),
+			mcp.WithString("case_sensitive", mcp.DefaultString("false"), mcp.Description("Case sensitive search: 'true' or 'false'")),
+			mcp.WithString("whole_word", mcp.DefaultString("false"), mcp.Description("Match whole words only: 'true' or 'false'")),
+			mcp.WithString("regex", mcp.DefaultString("false"), mcp.Description("Treat pattern as regex: 'true' or 'false'")),
+			mcp.WithNumber("max_results", mcp.DefaultNumber(100), mcp.Description("Maximum number of results")),
+			mcp.WithNumber("timeout_ms", mcp.DefaultNumber(15000), mcp.Description("Timeout in milliseconds")),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			tabID := getTabID(request)
+			if tabID == "" {
+				return mcp.NewToolResultError("tab_id is required"), nil
+			}
+			pattern := request.GetString("pattern", "")
+			if pattern == "" {
+				return mcp.NewToolResultError("pattern is required"), nil
+			}
+			caseSens := request.GetString("case_sensitive", "false") == "true"
+			wholeWord := request.GetString("whole_word", "false") == "true"
+			isRegex := request.GetString("regex", "false") == "true"
+			maxResults := request.GetInt("max_results", 100)
+			params := fmt.Sprintf(`{"pattern":"%s","case_sensitive":%v,"whole_word":%v,"regex":%v,"max_results":%v}`,
+				escapeJSON(pattern), caseSens, wholeWord, isRegex, maxResults)
+			timeout := request.GetInt("timeout_ms", 15000)
+			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
+			return executeViaWebSocket(cmdID, tabID, "search_text", params, timeout, debug)
 		},
 	)
 

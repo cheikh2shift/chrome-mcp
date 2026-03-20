@@ -459,10 +459,24 @@ async function processCommand(msg) {
         break;
         
       case 'take_screenshot':
-        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+        const windowId = tab.windowId && tab.windowId > 0 ? tab.windowId : null;
+        const dataUrl = await chrome.tabs.captureVisibleTab(windowId, {
           format: 'png'
         });
         result = { success: true, dataUrl };
+        break;
+        
+      case 'search_text':
+        result = await sendTabMessage(tab.tabId, {
+          type: 'search_text',
+          pattern: data?.pattern || '',
+          options: {
+            caseSensitive: data?.case_sensitive || false,
+            wholeWord: data?.whole_word || false,
+            regex: data?.regex || false,
+            maxResults: data?.max_results || 100
+          }
+        });
         break;
         
       default:
