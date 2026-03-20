@@ -48,6 +48,72 @@ async function ensureDebuggerAttached(tabId) {
   }
 }
 
+const jQueryInjected = new Map();
+
+async function ensureJQueryLoaded(tabId) {
+  if (jQueryInjected.get(tabId)) {
+    return true;
+  }
+  
+  try {
+    const attached = await ensureDebuggerAttached(tabId);
+    if (!attached) {
+      return false;
+    }
+    
+    const jQueryCDN = `https://code.jquery.com/jquery-3.7.1.min.js`;
+    const script = `
+      (function() {
+        if (typeof window.jQuery !== 'undefined') {
+          return { alreadyLoaded: true };
+        }
+        var script = document.createElement('script');
+        script.src = '${jQueryCDN}';
+        script.onload = function() { window.jQueryLoaded = true; };
+        document.head.appendChild(script);
+        return new Promise(function(resolve) {
+          var checkCount = 0;
+          var checkJQuery = setInterval(function() {
+            checkCount++;
+            if (window.jQuery) {
+              clearInterval(checkJQuery);
+              resolve({ loaded: true });
+            } else if (checkCount > 100) {
+              clearInterval(checkJQuery);
+              resolve({ error: 'jQuery load timeout' });
+            }
+          }, 50);
+        });
+      })()
+    `;
+    
+    const result = await new Promise((resolve, reject) => {
+      chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+        expression: script,
+        awaitPromise: true,
+        returnByValue: true
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else if (response.exceptionDetails) {
+          resolve({ error: response.exceptionDetails.text });
+        } else {
+          resolve(response.result.value);
+        }
+      });
+    });
+    
+    if (!result.error) {
+      jQueryInjected.set(tabId, true);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error('Failed to inject jQuery:', error.message);
+    return false;
+  }
+}
+
 async function executeScriptViaDebugger(tabId, script, awaitPromise = true) {
   try {
     const attached = await ensureDebuggerAttached(tabId);
@@ -97,23 +163,39 @@ async function clickElementViaDebugger(tabId, selector, index = 0) {
   }
   
   try {
-    const attached = await ensureDebuggerAttached(tabId);
-    if (!attached) {
-      return { error: 'Failed to attach debugger' };
+    const jQueryLoaded = await ensureJQueryLoaded(tabId);
+    if (!jQueryLoaded) {
+      return { error: 'Failed to load jQuery' };
     }
+    
+    const escapedSelector = selector.replace(/'/g, "\\'");
     
     const script = `
       (function() {
-        const elements = document.querySelectorAll('${selector.replace(/'/g, "\\'")}');
-        if (elements.length === 0) {
-          return { error: 'No elements found for selector: ${selector.replace(/'/g, "\\'")}' };
+        try {
+          var $ = window.jQuery;
+          var elements = $( '${escapedSelector}' );
+          if (elements.length === 0) {
+            return { error: 'No elements found for selector: ${escapedSelector}' };
+          }
+          var el = elements[${index}] || elements[0];
+          if (!el) {
+            return { error: 'No element at index ${index}' };
+          }
+          $(el).click();
+          return { 
+            success: true, 
+            clicked: { 
+              tag: el.tagName, 
+              text: (el.innerText || el.textContent || '').trim().substring(0, 50),
+              selector: '${escapedSelector}',
+              index: ${index},
+              matchedCount: elements.length
+            } 
+          };
+        } catch(e) {
+          return { error: e.message || 'Selector error' };
         }
-        const el = elements[${index}] || elements[0];
-        if (!el) {
-          return { error: 'No element at index ${index}' };
-        }
-        el.click();
-        return { success: true, clicked: { tag: el.tagName, text: el.innerText?.trim()?.substring(0, 50) } };
       })()
     `;
     
@@ -201,6 +283,7 @@ function connectWebSocket() {
     socket.onmessage = async (event) => {
       if (ws !== socket) return;
       try {
+        console.log('WS received:', event.data.substring(0, 200));
         const msg = JSON.parse(event.data);
         await handleWebSocketMessage(msg);
       } catch (e) {
@@ -538,6 +621,24 @@ function isUnsupportedTabURL(url = '') {
   return /^(chrome|chrome-extension|devtools|edge|about):\/\//i.test(url);
 }
 
+function isValidSelector(selector) {
+  if (!selector || typeof selector !== 'string' || selector.trim() === '') {
+    return false;
+  }
+  
+  const trimmed = selector.trim();
+  
+  if (trimmed.length > 500) {
+    return false;
+  }
+  
+  if (/[<>{}\\]/.test(trimmed)) {
+    return false;
+  }
+  
+  return true;
+}
+
 function toBool(value, defaultValue) {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.toLowerCase() === 'true';
@@ -669,7 +770,7 @@ async function processCommand(msg) {
       return;
     }
 
-    const commandNeedsContentScript = cmdType !== 'execute_script';
+    const commandNeedsContentScript = cmdType !== 'execute_script' && cmdType !== 'click_element';
     let contentScriptLoaded = false;
     if (commandNeedsContentScript) {
       contentScriptLoaded = await checkContentScriptLoaded(tab.tabId);
@@ -780,6 +881,16 @@ async function processCommand(msg) {
           return;
         }
         
+        if (!isValidSelector(selectorToClick)) {
+          sendCommandResponse({
+            type: 'command_failed',
+            cmd_id: actualCmdId,
+            error: `Invalid selector: ${selectorToClick}`
+          });
+          return;
+        }
+        
+        console.log('click_element processing selector:', selectorToClick, 'index:', indexToClick);
         result = await clickElementViaDebugger(tab.tabId, selectorToClick, 0);
         break;
         

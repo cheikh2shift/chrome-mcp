@@ -106,6 +106,8 @@ func (h *WSHub) BroadcastToExtensions(msg []byte) {
 	}
 	h.mu.RUnlock()
 
+	debugLog("BroadcastToExtensions: broadcasting to %d extension clients, msgLen=%d", len(clients), len(msg))
+
 	var stale []*websocket.Conn
 	for _, client := range clients {
 		_ = client.SetWriteDeadline(time.Now().Add(2 * time.Second))
@@ -193,6 +195,7 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 			tabID, _ := msg["tab_id"].(string)
 			cmdType, _ := msg["cmd_type"].(string)
 			params, _ := msg["params"].(string)
+			debugLog("Daemon received command: cmdID=%s, tabID=%s, cmdType=%s, params=%s", cmdID, tabID, cmdType, params)
 			if cmdID == "" {
 				continue
 			}
@@ -788,6 +791,9 @@ func handleExtensionWebSocket(hub *WSHub, db *chromedb.SharedDB, debug bool) htt
 			}
 
 			msgType, _ := msg["type"].(string)
+			if debug {
+				debugLog("Extension WS received: type=%s, msgLen=%d", msgType, len(message))
+			}
 
 			switch msgType {
 			case "command_complete":
@@ -846,10 +852,26 @@ func handleMCPWebSocket(hub *WSHub, db *chromedb.SharedDB, debug bool) http.Hand
 }
 
 func runMCPServer(debug bool) {
+	toolMiddleware := server.ToolHandlerMiddleware(func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			toolName := request.Params.Name
+			args := request.GetArguments()
+			debugLog("MCP Tool called: name=%s, args=%v", toolName, args)
+			result, err := next(ctx, request)
+			if err != nil {
+				debugLog("MCP Tool error: name=%s, err=%v", toolName, err)
+			}
+			return result, err
+		}
+	})
+
 	mcpServer := server.NewMCPServer(
 		"chrome-mcp",
 		"1.0.0",
 		server.WithToolCapabilities(true),
+		server.WithLogging(),
+		server.WithRecovery(),
+		server.WithToolHandlerMiddleware(toolMiddleware),
 	)
 
 	getTabID := func(request mcp.CallToolRequest) string {
@@ -1216,10 +1238,16 @@ func runMCPServer(debug bool) {
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
+			selector := request.GetString("selector", "")
+			textParam := request.GetString("text", "")
+			debugLog("click_element: tabID=%s, selector=%s, text=%s", tabID, selector, textParam)
 			if tabID == "" {
 				return mcp.NewToolResultError("tab_id is required"), nil
 			}
-			selector := request.GetString("selector", "")
+			if selector == "" && textParam != "" {
+				selector = fmt.Sprintf("*:contains('%s')", textParam)
+				debugLog("click_element: built selector from text: %s", selector)
+			}
 			if selector == "" {
 				return mcp.NewToolResultError("selector is required"), nil
 			}
@@ -1232,6 +1260,7 @@ func runMCPServer(debug bool) {
 			}
 			paramsBytes, _ := json.Marshal(paramsObj)
 			params := string(paramsBytes)
+			debugLog("click_element: cmdID=%s, params=%s", cmdID, params)
 			return executeViaWebSocket(cmdID, tabID, "click_element", params, timeout, debug)
 		},
 	)
