@@ -17,10 +17,10 @@ Or install a specific version:
 ```bash
 curl -sSL https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/install.sh | sh -s v0.0.1
 ```
+![Demo](https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/screen.gif)
 
 ![Chrome MCP Controller](https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/screen1.png)
 
-![Demo](https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/screen.gif)
 
 ## Architecture
 
