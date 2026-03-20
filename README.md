@@ -41,16 +41,28 @@ An MCP (Model Context Protocol) server that allows AI agents (like godex) to con
 
 ## Installation
 
-### 1. Build the MCP Server
+### Quick Install (Linux/macOS)
 
 ```bash
+curl -sSL https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/install.sh | sh
+```
+
+Or install a specific version:
+```bash
+curl -sSL https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/install.sh | sh -s v0.0.1
+```
+
+### Manual Install
+
+```bash
+# Build from source
 git clone https://github.com/cheikh2shift/chrome-mcp.git
 cd chrome-mcp
 go build -o chrome-mcp ./cmd/chrome-mcp
 sudo mv chrome-mcp /usr/local/bin/
 ```
 
-### 2. Install Chrome Extension
+### Chrome Extension
 
 1. Open Chrome and navigate to `chrome://extensions/`
 2. Enable "Developer mode" (toggle in top right)
