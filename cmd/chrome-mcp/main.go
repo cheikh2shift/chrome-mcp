@@ -501,7 +501,7 @@ func daemonize(port int, debug bool) error {
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Stdout, _ = os.OpenFile(getLogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	cmd.Stderr = cmd.Stdout
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setupDaemonCommand(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
