@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type Tab struct {
@@ -26,7 +26,7 @@ type SharedDB struct {
 }
 
 func NewSharedDB(path string) (*SharedDB, error) {
-	db, err := sql.Open("sqlite3", path+"?mode=rwc&_journal_mode=WAL")
+	db, err := sql.Open("sqlite", path+"?mode=rwc&_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -34,7 +34,7 @@ func NewSharedDB(path string) (*SharedDB, error) {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		// Create new database if it doesn't exist
-		db, err = sql.Open("sqlite3", path+"?mode=rwc&_journal_mode=WAL")
+		db, err = sql.Open("sqlite", path+"?mode=rwc&_journal_mode=WAL")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create database: %w", err)
 		}
