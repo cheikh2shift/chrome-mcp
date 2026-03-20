@@ -75,8 +75,10 @@ if command -v sha256sum >/dev/null 2>&1; then
 fi
 
 tar -xzf "${FILENAME}"
+EXTRACTED_BINARY="${BINARY_NAME}-${OS}-${ARCH}"
 rm -f "${FILENAME}"
-chmod +x "${BINARY_NAME}"
+chmod +x "${EXTRACTED_BINARY}"
+mv "${EXTRACTED_BINARY}" "${BINARY_NAME}"
 
 mkdir -p "$INSTALL_DIR"
 
