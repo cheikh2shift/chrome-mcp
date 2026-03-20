@@ -13,14 +13,24 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
+            goos: linux
+            goarch: amd64
             artifact: chrome-mcp-linux-amd64
           - platform: linux/arm64
+            goos: linux
+            goarch: arm64
             artifact: chrome-mcp-linux-arm64
           - platform: darwin/amd64
+            goos: darwin
+            goarch: amd64
             artifact: chrome-mcp-darwin-amd64
           - platform: darwin/arm64
+            goos: darwin
+            goarch: arm64
             artifact: chrome-mcp-darwin-arm64
           - platform: windows/amd64
+            goos: windows
+            goarch: amd64
             artifact: chrome-mcp-windows-amd64.exe
     steps:
       - name: Checkout code
@@ -37,8 +47,8 @@ jobs:
 
       - name: Build server
         env:
-          GOOS: ${{ split(matrix.platform, '/')[0] }}
-          GOARCH: ${{ split(matrix.platform, '/')[1] }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
           ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -46,7 +56,7 @@ jobs:
 
       - name: Package server
         run: |
-          if [ "${{ matrix.platform }}" = "windows/amd64" ]; then
+          if [ "${{ matrix.goos }}" = "windows" ]; then
             zip ${{ matrix.artifact }}.zip ${{ matrix.artifact }}
           else
             tar -czvf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
@@ -72,6 +82,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Update manifest version
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          cd extension
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" manifest.json
 
       - name: Package extension
         run: |
