@@ -17,11 +17,9 @@ providers:
     description: Ollama with Chrome MCP
     mcp_servers:
       - name: chrome
-        command: "/usr/local/bin/chrome-mcp"
+        command: "$HOME/.local/bin/chrome-mcp"
         args: ["--debug"]
         transport: "stdio"
-        start: true
-        # When start: true, godex will NOT manage this server.
         # You must start chrome-mcp manually before using godex.
         # The chrome extension should be connected to the same server.
 
