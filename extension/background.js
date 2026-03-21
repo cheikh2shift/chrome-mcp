@@ -161,7 +161,15 @@ async function executeScriptViaDebugger(tabId, script, awaitPromise = true) {
             error: response.result.description || 'Script error'
           });
         } else {
-          resolve(response.result.value);
+          let value = response.result?.value;
+          if (value === undefined && response.result?.description) {
+            try {
+              value = JSON.parse(response.result.description);
+            } catch (e) {
+              value = response.result.description;
+            }
+          }
+          resolve(value);
         }
       });
     });
@@ -169,9 +177,9 @@ async function executeScriptViaDebugger(tabId, script, awaitPromise = true) {
     chrome.debugger.onEvent.removeListener(consoleHandler);
     
     let response;
-    if (result === undefined) {
+    if (result === undefined || result === null) {
       response = { success: true };
-    } else if (result.error) {
+    } else if (typeof result === 'object' && result.error) {
       response = result;
     } else {
       response = { result };
