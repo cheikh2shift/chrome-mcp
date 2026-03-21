@@ -94,6 +94,31 @@
       letter-spacing: 0.5px;
     }
     
+    .filter-inputs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    
+    .filter-input {
+      flex: 1;
+      padding: 6px 10px;
+      background: #0f3460;
+      border: 1px solid #16213e;
+      border-radius: 4px;
+      color: #eee;
+      font-size: 11px;
+    }
+    
+    .filter-input::placeholder {
+      color: #666;
+    }
+    
+    .filter-input:focus {
+      outline: none;
+      border-color: #00d4ff;
+    }
+    
     .tabs-list {
       max-height: 200px;
       overflow-y: auto;
@@ -238,6 +263,10 @@
   
   <div class="tabs-section">
     <div class="section-title">Open Tabs</div>
+    <div class="filter-inputs">
+      <input type="text" class="filter-input" id="filterUrl" placeholder="Filter by URL...">
+      <input type="text" class="filter-input" id="filterTitle" placeholder="Filter by name...">
+    </div>
     <div class="tabs-list" id="tabsList">
       <div class="loading"><div class="spinner"></div></div>
     </div>

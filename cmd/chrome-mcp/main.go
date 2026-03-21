@@ -218,9 +218,16 @@ func (h *WSHub) HandleMCPClient(conn *websocket.Conn, db *chromedb.SharedDB) {
 			db.AddCommand(cmd)
 
 			var paramsObj map[string]interface{}
-			json.Unmarshal([]byte(params), &paramsObj)
-			if paramsObj == nil {
-				paramsObj = make(map[string]interface{})
+			paramsBytes := []byte(params)
+			if err := json.Unmarshal(paramsBytes, &paramsObj); err != nil {
+				if cmdType == "execute_script" {
+					paramsObj = map[string]interface{}{
+						"script": params,
+					}
+				} else {
+					paramsObj = make(map[string]interface{})
+					debugLog("Failed to parse params as JSON for cmdType=%s: %v", cmdType, err)
+				}
 			}
 			paramsObj["_type"] = cmdType
 			paramsObj["_cmd_id"] = cmdID
@@ -953,11 +960,14 @@ func runMCPServer(debug bool) {
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			tabID := getTabID(request)
 			if tabID == "" {
-				return mcp.NewToolResultError("tab_id is required"), nil
+				return mcp.NewToolResultError("tab_id is required. Use list_connected_tabs to see available tabs."), nil
 			}
 			script := request.GetString("script", "")
 			if script == "" {
-				return mcp.NewToolResultError("script is required for execute_script"), nil
+				return mcp.NewToolResultError("script is required for execute_script. Provide JavaScript code to execute in the tab."), nil
+			}
+			if len(script) > 100000 {
+				return mcp.NewToolResultError("script exceeds maximum length of 100KB"), nil
 			}
 			timeout := request.GetInt("timeout_ms", 10000)
 			cmdID := fmt.Sprintf("cmd_%d", time.Now().UnixNano())

@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   await testConnection();
   await loadCurrentTabs();
   await loadConnectedTabs();
+  
+  document.getElementById('filterUrl').addEventListener('input', renderTabsList);
+  document.getElementById('filterTitle').addEventListener('input', renderTabsList);
 });
 
 async function testConnection() {
@@ -66,13 +69,21 @@ async function loadConnectedTabs() {
 
 function renderTabsList() {
   const tabsList = document.getElementById('tabsList');
+  const filterUrl = document.getElementById('filterUrl').value.toLowerCase();
+  const filterTitle = document.getElementById('filterTitle').value.toLowerCase();
 
-  if (currentTabs.length === 0) {
-    tabsList.innerHTML = '<div class="no-tabs">No tabs available</div>';
+  const filteredTabs = currentTabs.filter(tab => {
+    const matchesUrl = !filterUrl || (tab.url && tab.url.toLowerCase().includes(filterUrl));
+    const matchesTitle = !filterTitle || (tab.title && tab.title.toLowerCase().includes(filterTitle));
+    return matchesUrl && matchesTitle;
+  });
+
+  if (filteredTabs.length === 0) {
+    tabsList.innerHTML = '<div class="no-tabs">No tabs match the filter</div>';
     return;
   }
 
-  tabsList.innerHTML = currentTabs.map(tab => {
+  tabsList.innerHTML = filteredTabs.map(tab => {
     const tabId = `tab_${tab.id}`;
     const isConnected = connectedTabIds.has(tabId);
 

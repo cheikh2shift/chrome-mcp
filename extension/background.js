@@ -121,6 +121,25 @@ async function executeScriptViaDebugger(tabId, script, awaitPromise = true) {
       return { error: 'Failed to attach debugger' };
     }
     
+    const consoleMessages = [];
+    const consoleHandler = (debuggee, params) => {
+      const args = params.args.map(arg => {
+        if (arg.type === 'string') return arg.value;
+        if (arg.type === 'number') return arg.value;
+        if (arg.type === 'boolean') return arg.value;
+        if (arg.type === 'undefined') return undefined;
+        if (arg.type === 'object') return arg.description || '[Object]';
+        if (arg.type === 'function') return arg.description || '[Function]';
+        return arg.value;
+      });
+      consoleMessages.push({
+        type: params.type,
+        messages: args
+      });
+    };
+    
+    chrome.debugger.onEvent.addListener(consoleHandler);
+    
     const expression = awaitPromise
       ? `(async () => { ${script} })()`
       : `(function() { ${script} })()`;
@@ -147,11 +166,22 @@ async function executeScriptViaDebugger(tabId, script, awaitPromise = true) {
       });
     });
     
+    chrome.debugger.onEvent.removeListener(consoleHandler);
+    
+    let response;
     if (result === undefined) {
-      return { success: true };
+      response = { success: true };
+    } else if (result.error) {
+      response = result;
+    } else {
+      response = { result };
     }
     
-    return result;
+    if (consoleMessages.length > 0) {
+      response.consoleOutput = consoleMessages;
+    }
+    
+    return response;
   } catch (error) {
     return { error: error.message };
   }
@@ -406,16 +436,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading' || changeInfo.url) {
-    let unregistered = false;
     connectedTabs.forEach((tab, key) => {
       if (tab.tabId === tabId) {
-        connectedTabs.delete(key);
-        apiRequest('/unregister', 'POST', { id: key }).catch(() => {});
-        unregistered = true;
-        console.log('Tab unregistered due to navigation/refresh:', key);
+        if (changeInfo.url) {
+          tab.url = changeInfo.url;
+        }
       }
     });
-    if (unregistered) updateBadge();
   }
 });
 
