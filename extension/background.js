@@ -206,7 +206,9 @@ async function clickElementViaDebugger(tabId, selector, index = 0) {
       return { error: 'Failed to load jQuery' };
     }
     
-    const escapedSelector = selector.replace(/'/g, "\\'");
+    const escapedSelector = selector
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, '\\\'');
     
     const script = `
       (function() {
