@@ -159,7 +159,33 @@ Add chrome-mcp using the Codex CLI:
 codex mcp add chrome -- chrome-mcp --debug
 ```
 
+Or add the following to `~/.codex/config.toml`
+
+```toml
+[mcp_servers.chrome]
+command = "./chrome-mcp"
+args = ["--debug"]
+```
+
 Then restart Codex. The Chrome MCP tools will be available in your sessions.
+
+### Zed
+
+Add chrome-mcp to your Zed `settings.json`:
+
+```json
+{
+  "context_servers": {
+    "chrome": {
+      "command": {
+        "path": "chrome-mcp"
+      }
+    }
+  }
+}
+```
+
+Then restart Zed. The Chrome MCP tools will be available in your sessions.
 
 ### Verify Installation
 
