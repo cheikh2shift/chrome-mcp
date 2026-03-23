@@ -153,12 +153,10 @@ Then restart Claude Desktop. The Chrome MCP tools will be available in your conv
 
 ### Codex
 
-Add chrome-mcp to your Codex configuration at `~/.codex/config.toml`:
+Add chrome-mcp using the Codex CLI:
 
-```toml
-[mcp_servers.chrome]
-command = "chrome-mcp"
-args = ["--debug"]
+```bash
+codex mcp add chrome -- chrome-mcp --debug
 ```
 
 Then restart Codex. The Chrome MCP tools will be available in your sessions.

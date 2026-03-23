@@ -515,7 +515,6 @@ func daemonize(port int, debug bool) error {
 	}
 
 	os.WriteFile(getPIDFile(), []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
-	fmt.Fprintf(os.Stderr, "Daemon started on port %d (pid %d)\n", port, cmd.Process.Pid)
 	return nil
 }
 
