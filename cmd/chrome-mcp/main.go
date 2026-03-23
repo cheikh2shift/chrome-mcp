@@ -487,7 +487,7 @@ func killDaemon() bool {
 	}
 
 	os.Remove(pidFile)
-	fmt.Println("Daemon killed")
+	fmt.Fprintln(os.Stderr, "Daemon killed")
 	return true
 }
 
@@ -515,7 +515,7 @@ func daemonize(port int, debug bool) error {
 	}
 
 	os.WriteFile(getPIDFile(), []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
-	fmt.Printf("Daemon started on port %d (pid %d)\n", port, cmd.Process.Pid)
+	fmt.Fprintf(os.Stderr, "Daemon started on port %d (pid %d)\n", port, cmd.Process.Pid)
 	return nil
 }
 
@@ -564,7 +564,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("chrome-mcp version %s (commit: %s, date: %s)\n", version, commit, date)
+		fmt.Fprintf(os.Stderr, "chrome-mcp version %s (commit: %s, date: %s)\n", version, commit, date)
 		return
 	}
 
@@ -577,7 +577,7 @@ func main() {
 
 	if isDaemonRunning() {
 		port := getDaemonPort()
-		fmt.Printf("Daemon already running on port %d\n", port)
+		fmt.Fprintf(os.Stderr, "Daemon already running on port %d\n", port)
 	} else if !*serverMode {
 		if err := daemonize(*port, debug); err != nil {
 			log.Fatalf("Failed to start daemon: %v", err)

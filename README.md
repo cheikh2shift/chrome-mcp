@@ -119,6 +119,69 @@ providers:
 default_provider: ollama
 ```
 
+## Integration with AI Assistants
+
+> [!IMPORTANT]
+> Before configuring any AI assistant, ensure chrome-mcp is installed on your system:
+> ```bash
+> # Quick install
+> curl -sSL https://raw.githubusercontent.com/cheikh2shift/chrome-mcp/main/install.sh | sh
+> 
+> # Or build from source
+> git clone https://github.com/cheikh2shift/chrome-mcp.git
+> cd chrome-mcp
+> go build -o chrome-mcp ./cmd/chrome-mcp
+> sudo mv chrome-mcp /usr/local/bin/
+> ```
+
+### Claude Desktop (Claude Code)
+
+Add chrome-mcp to your Claude Desktop configuration at `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "chrome": {
+      "command": "chrome-mcp",
+      "args": ["--debug"]
+    }
+  }
+}
+```
+
+Then restart Claude Desktop. The Chrome MCP tools will be available in your conversations.
+
+### Codex
+
+Add chrome-mcp to your Codex configuration at `~/.codex.json`:
+
+```json
+{
+  "mcpServers": {
+    "chrome": {
+      "command": "chrome-mcp",
+      "args": ["--debug"]
+    }
+  }
+}
+```
+
+Then restart Codex. The Chrome MCP tools will be available in your sessions.
+
+### Verify Installation
+
+To verify chrome-mcp is working correctly with your AI assistant:
+
+```bash
+# Run the test script
+./test.sh
+
+# Or manually test
+npx @modelcontextprotocol/inspector stdio chrome-mcp --debug
+```
+
+This opens the MCP Inspector where you can test the available tools.
+
 ## Available Tools
 
 | Tool | Description |
