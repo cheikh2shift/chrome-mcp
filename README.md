@@ -136,7 +136,7 @@ default_provider: ollama
 
 ### Claude Desktop (Claude Code)
 
-Add chrome-mcp to your Claude Desktop configuration at `~/.claude.json`:
+Add chrome-mcp to your Claude Desktop configuration at `~/.config/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -153,17 +153,12 @@ Then restart Claude Desktop. The Chrome MCP tools will be available in your conv
 
 ### Codex
 
-Add chrome-mcp to your Codex configuration at `~/.codex.json`:
+Add chrome-mcp to your Codex configuration at `~/.codex/config.toml`:
 
-```json
-{
-  "mcpServers": {
-    "chrome": {
-      "command": "chrome-mcp",
-      "args": ["--debug"]
-    }
-  }
-}
+```toml
+[mcp_servers.chrome]
+command = "chrome-mcp"
+args = ["--debug"]
 ```
 
 Then restart Codex. The Chrome MCP tools will be available in your sessions.
@@ -177,7 +172,7 @@ To verify chrome-mcp is working correctly with your AI assistant:
 ./test.sh
 
 # Or manually test
-npx @modelcontextprotocol/inspector stdio chrome-mcp --debug
+npx @modelcontextprotocol/inspector --cli --method "tools/list" chrome-mcp 
 ```
 
 This opens the MCP Inspector where you can test the available tools.
