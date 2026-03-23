@@ -132,7 +132,7 @@ default_provider: ollama
 | `execute_script` | Execute JavaScript in the target tab |
 | `get_element_details` | Get detailed element info (styles, bounding rect) |
 | `wait_for_element` | Wait for element to appear |
-| `take_screenshot` | Capture page screenshot |
+
 
 ## Example Usage
 
