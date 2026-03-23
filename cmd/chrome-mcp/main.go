@@ -588,7 +588,7 @@ func main() {
 	}
 
 	if debug {
-		debugLog("Starting chrome-mcp v1.0.0")
+		debugLog("Starting chrome-mcp " + version)
 	}
 
 	if *serverMode {
